@@ -1,0 +1,55 @@
+[Unit]
+Description=SoulCam IP Camera with AI (RK3566)
+Documentation=file:///home/ubuntu/SoulCam/doc/framework/SOULCAM_FRAMEWORK.md
+After=network.target multi-user.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# GStreamer RGA plugin path
+Environment=GST_PLUGIN_PATH=/usr/local/lib/aarch64-linux-gnu/gstreamer-1.0
+# Suppress GStreamer debug noise
+Environment=GST_DEBUG=1
+
+# Working directory
+WorkingDirectory=/home/ubuntu/SoulCam
+
+# --- RTSP + Snapshot (recommended default) ---
+ExecStart=/home/ubuntu/SoulCam/build/soulcam --snapshot
+
+# --- RTSP only (no snapshot) ---
+#ExecStart=/home/ubuntu/SoulCam/build/soulcam
+
+# --- RTSP + AI + Snapshot ---
+#ExecStart=/home/ubuntu/SoulCam/build/soulcam --ai --snapshot --model /home/ubuntu/YoloV8-NPU/rk3566/yolov8n.rknn
+
+# --- RTSP + AI + Overlay + Snapshot ---
+#ExecStart=/home/ubuntu/SoulCam/build/soulcam --ai --overlay --snapshot --model /home/ubuntu/YoloV8-NPU/rk3566/yolov8n.rknn
+
+# --- Full features: AI + Overlay + ONVIF + Snapshot ---
+#ExecStart=/home/ubuntu/SoulCam/build/soulcam --ai --overlay --onvif --snapshot --model /home/ubuntu/YoloV8-NPU/rk3566/yolov8n.rknn
+
+# --- Legacy: ONVIF device service (WS-Discovery + SOAP for NVR/VMS) ---
+#ExecStart=/home/ubuntu/SoulCam/build/soulcam --onvif-device --snapshot
+
+# Graceful shutdown
+ExecStop=/bin/kill -TERM $MAINPID
+TimeoutStopSec=5
+
+# Restart on failure (but not on clean exit)
+Restart=on-failure
+RestartSec=3
+
+# Resource limits
+LimitNOFILE=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=soulcam
+
+[Install]
+WantedBy=multi-user.target
