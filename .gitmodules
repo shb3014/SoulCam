@@ -1,0 +1,3 @@
+[submodule "YoloV8-NPU"]
+	path = YoloV8-NPU
+	url = git@github.com:shb3014/YoloV8-NPU.git
