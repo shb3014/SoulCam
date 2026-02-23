@@ -891,57 +891,9 @@ curl http://192.168.1.45:8080/
 
 ## Next Steps
 
-### Priority 1: Tuya IPC SDK Integration (target: Alexa / Google / HomeKit)
+### Priority 1: Future Enhancements
 
-The primary goal of SoulCam is to connect to the **Tuya IoT Cloud** and from
-there enable streaming to Amazon Alexa (Echo Show), Google Assistant
-(Chromecast), and potentially Apple HomeKit. This replaces the earlier ONVIF
-NVR-focused direction.
-
-See `doc/tuya/TUYA_INTEGRATION_PLAN.md` for the full integration plan.
-
-1. **JPEG snapshot endpoint** *(completed 2026-02-12)*: Single-frame JPEG
-   capture from the ISP selfpath (or one-shot mainpath). Serves via HTTP
-   `GET /snapshot` on port 8088. Needed for Tuya motion detection push
-   notifications and cloud storage event thumbnails. Also useful standalone.
-   Enable with `--snapshot` flag.
-
-2. **Tuya adapter layer** *(completed 2026-02-12)*: Skeleton module
-   (`pipeline/tuya_ipc.h/.cpp`) defining the interfaces for Tuya IPC SDK
-   integration: H.264 frame feed, event notifications, device control DPs.
-   Not yet linked to the actual Tuya SDK (requires SDK binaries from
-   Tuya Developer Platform).
-
-3. **Tuya Cloud setup** *(user action required)*:
-   - Register on [Tuya Developer Platform](https://platform.tuya.com)
-   - Create an IP Camera product (TuyaOS → Custom Solution)
-   - Get PID, UUID, AuthKey credentials
-   - Download TuyaOS IPC SDK for aarch64-linux (or request via support)
-   - See `doc/tuya/TUYA_INTEGRATION_PLAN.md` for step-by-step guide
-
-4. **H.264 frame tap + Tuya ring buffer integration**: Refactor the GStreamer
-   mainpath pipeline to tee encoded H.264 NAL units to both RTSP and Tuya
-   ring buffer. This is the core integration step that enables P2P live
-   preview, Echo Show, Chromecast, and cloud storage.
-
-5. **AI event → Tuya notification**: Bridge AI detections (person, pet, etc.)
-   to Tuya event system: `tuya_ipc_notify_with_event()` with JPEG snapshot
-   attachment. Enables push notifications to Tuya Smart app.
-
-### Priority 2: Future Enhancements
-
-6. **Multi-model pipeline** *(completed 2026-02-12)*: Multiple RKNN models
-   running on the same selfpath frame with independent frame-skip rates.
-   Supports runtime add/remove/swap via control socket. See "Multi-Model
-   Pipeline" section above for details.
-
-7. **Audio support**: Add microphone input (ALSA → AAC/PCM) for two-way
-   audio through Tuya P2P. Required for full IPC functionality.
-
-8. **Local SD card recording**: Integrate Tuya's `tuya_ipc_ss_*` local
-   storage APIs for on-device event/continuous recording.
-
-9. **Cascade model pipeline**: Chain model outputs (e.g., person detection
+1. **Cascade model pipeline**: Chain model outputs (e.g., person detection
    → face crop → face recognition). Currently all models see the full
    frame; cascade mode would crop ROIs from model A and feed to model B.
 
@@ -950,3 +902,24 @@ See `doc/tuya/TUYA_INTEGRATION_PLAN.md` for the full integration plan.
 - **ONVIF device service**: Already implemented and working (`--onvif-device`).
   Kept as optional feature for local NVR compatibility. No further ONVIF
   development planned (authentication, etc.) unless specifically needed.
+
+- **Tuya IPC SDK Integration** (target: Alexa / Google / HomeKit):
+  Original goal was to connect to Tuya IoT Cloud for streaming to Amazon
+  Alexa (Echo Show), Google Assistant (Chromecast), and Apple HomeKit.
+  See `doc/tuya/TUYA_INTEGRATION_PLAN.md` for the full integration plan.
+
+  Completed preparatory work:
+  - **JPEG snapshot endpoint** *(completed 2026-02-12)*: Single-frame JPEG
+    capture from ISP selfpath. HTTP `GET /snapshot` on port 8088. Enable
+    with `--snapshot` flag.
+  - **Tuya adapter layer** *(completed 2026-02-12)*: Skeleton module
+    (`pipeline/tuya_ipc.h/.cpp`) with interfaces for Tuya IPC SDK integration.
+    Not linked to actual Tuya SDK (requires SDK binaries from Tuya Developer
+    Platform).
+
+  Remaining work (if needed):
+  - Tuya Cloud setup (register on platform, get credentials)
+  - H.264 frame tap + Tuya ring buffer integration
+  - AI event → Tuya notification bridge
+  - Audio support (ALSA → AAC/PCM for two-way audio)
+  - Local SD card recording (Tuya `tuya_ipc_ss_*` APIs)
