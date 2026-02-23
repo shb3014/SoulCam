@@ -1,3 +1,6 @@
 [submodule "YoloV8-NPU"]
 	path = YoloV8-NPU
 	url = git@github.com:shb3014/YoloV8-NPU.git
+[submodule "rive-runtime"]
+	path = rive-runtime
+	url = git@github.com:shb3014/rive-runtime.git
