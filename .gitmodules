@@ -4,3 +4,6 @@
 [submodule "rive-runtime"]
 	path = rive-runtime
 	url = git@github.com:shb3014/rive-runtime.git
+[submodule "CubismNativeSamples"]
+	path = CubismNativeSamples
+	url = git@github.com:shb3014/CubismNativeSamples.git
