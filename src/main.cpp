@@ -48,6 +48,7 @@
 #include "pipeline/rtsp_server.h"
 #include "pipeline/ai_capture.h"
 #include "ai/model_pipeline.h"         // Multi-model pipeline info
+#include "ai/hand_target_tracker.h"    // Single-target hand tracking policy
 #include "pipeline/overlay.h"          // overlay_update()
 #include "pipeline/onvif_metadata.h"   // ONVIF metadata stream
 #include "pipeline/onvif_device.h"     // ONVIF device service (WS-Discovery + SOAP)
@@ -58,12 +59,15 @@
 #include <gst/gst.h>
 
 #include <csignal>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <getopt.h>
 #include <unistd.h>
+#include <algorithm>
 #include <atomic>
 #include <sstream>
+#include <string_view>
 #include <iomanip>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -77,6 +81,40 @@ static void signal_handler(int sig) {
     (void)sig;
     SC_LOG_INFO("Signal %d received -- shutting down", sig);
     g_shutdown = true;
+}
+
+static bool iequal_ascii(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::string trim_copy(const std::string& s) {
+    size_t begin = 0;
+    while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) begin++;
+    size_t end = s.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+    return s.substr(begin, end - begin);
+}
+
+static bool should_enable_hand_target_tracker(const sc::Config& cfg) {
+    if (cfg.rknn.labels.empty()) return false;
+    std::stringstream ss(cfg.rknn.labels);
+    std::string token;
+    int non_empty_count = 0;
+    bool has_hand = false;
+    while (std::getline(ss, token, ',')) {
+        token = trim_copy(token);
+        if (token.empty()) continue;
+        non_empty_count++;
+        if (iequal_ascii(token, "hand")) has_hand = true;
+    }
+    return has_hand && (non_empty_count == 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +346,8 @@ static void scene_hub_close() {
 // ONVIF metadata stream
 // ---------------------------------------------------------------------------
 static sc::OnvifStream* g_onvif = nullptr;
+static sc::HandTargetTracker g_hand_tracker;
+static bool g_enable_hand_tracker = false;
 
 // ---------------------------------------------------------------------------
 // AI detection callback -- logs + publishes to scene hub + ONVIF
@@ -315,19 +355,28 @@ static sc::OnvifStream* g_onvif = nullptr;
 
 static void on_detections(const std::vector<sc::Detection>& dets,
                            int frame_w, int frame_h) {
-    SC_LOG_DEBUG("Detections: %zu in %dx%d", dets.size(), frame_w, frame_h);
-    for (const auto& d : dets) {
+    const std::vector<sc::Detection>* active = &dets;
+    std::vector<sc::Detection> tracked;
+    if (g_enable_hand_tracker) {
+        tracked = g_hand_tracker.update(dets);
+        active = &tracked;
+    }
+    const auto& out = *active;
+
+    SC_LOG_DEBUG("Detections: raw=%zu tracked=%zu in %dx%d",
+                 dets.size(), out.size(), frame_w, frame_h);
+    for (const auto& d : out) {
         SC_LOG_DEBUG("  [%s] %.2f @ (%d,%d)-(%d,%d)",
                      d.label ? d.label : "?", d.confidence,
                      d.left, d.top, d.right, d.bottom);
     }
 
     // Update shared overlay state (thread-safe)
-    sc::overlay_update(dets, frame_w, frame_h);
+    sc::overlay_update(out, frame_w, frame_h);
 
     // Push to ONVIF metadata stream
     if (g_onvif) {
-        sc::onvif_stream_push(g_onvif, dets, frame_w, frame_h);
+        sc::onvif_stream_push(g_onvif, out, frame_w, frame_h);
     }
 
     // Publish JSON to scene hub (extended format with model_id)
@@ -335,9 +384,9 @@ static void on_detections(const std::vector<sc::Detection>& dets,
 
     std::ostringstream msg;
     msg << "{\"source\":\"soulcam\",\"type\":\"detections\",\"count\":"
-        << dets.size() << ",\"objects\":[";
+        << out.size() << ",\"objects\":[";
     bool first = true;
-    for (const auto& d : dets) {
+    for (const auto& d : out) {
         if (!first) msg << ",";
         first = false;
         msg << "{\"model\":" << d.model_id
@@ -499,6 +548,7 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
                     cfg.rknn.conf_threshold = conf;
                     cfg.rknn.nms_threshold  = nms;
                 }
+                g_hand_tracker.reset();
                 SC_LOG_INFO("Control: slot %d swapped to %s (conf=%.2f, nms=%.2f)",
                             slot, path.c_str(), conf, nms);
             }
@@ -525,6 +575,7 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
 
         int idx = sc::ai_capture_add_model(ai, slot_cfg);
         if (idx >= 0) {
+            g_hand_tracker.reset();
             SC_LOG_INFO("Control: added model slot %d (%s, skip=%d)",
                         idx, path.c_str(), slot_cfg.skip_frames);
         }
@@ -536,7 +587,10 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
         }
         if (ai) {
             int rc = sc::ai_capture_remove_model(ai, slot);
-            if (rc == 0) SC_LOG_INFO("Control: removed model slot %d", slot);
+            if (rc == 0) {
+                g_hand_tracker.reset();
+                SC_LOG_INFO("Control: removed model slot %d", slot);
+            }
         }
     } else if (cmd == "enable_model") {
         int slot = json_int(msg, "slot", -1);
@@ -580,12 +634,16 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
 
 int main(int argc, char** argv) {
     sc::Config cfg = parse_args(argc, argv);
+    g_enable_hand_tracker = should_enable_hand_target_tracker(cfg);
 
     if (cfg.verbose) {
         sc::log_set_level(sc::LogLevel::DEBUG);
     }
 
     SC_LOG_INFO("SoulCam v%s starting", "0.2.0");
+    SC_LOG_INFO("Hand target tracker: %s (labels=\"%s\")",
+                g_enable_hand_tracker ? "enabled" : "disabled",
+                cfg.rknn.labels.c_str());
 
     // --- Set GStreamer plugin path BEFORE gst_init() ---
     // rgaconvert lives in a custom path; GStreamer scans plugins at init time.

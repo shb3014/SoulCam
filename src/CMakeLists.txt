@@ -90,6 +90,7 @@ set(SOULCAM_SOURCES
     pipeline/snapshot.cpp
     pipeline/tuya_ipc.cpp
     ai/detector.cpp
+    ai/hand_target_tracker.cpp
     ai/model_pipeline.cpp
     util/logger.cpp
 )

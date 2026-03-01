@@ -165,13 +165,35 @@ sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
 
 ---
 
+## 单目标手部跟踪策略（已实现）
+
+为满足“多手场景下优先跟踪一个目标手”的需求，主流程已增加单目标跟踪器：
+
+- 实现位置：`src/ai/hand_target_tracker.h/.cpp`
+- 接入位置：`src/main.cpp` 的 `on_detections()` 回调
+- 行为：`detector` 仍可检出多手，但 overlay/ONVIF/scene hub 只发布 1 个目标手
+- 启用条件：`--labels` 为单标签 `hand`（避免影响非手部通用检测流程）
+
+默认策略（Phase A + B）：
+
+- 多手时只锁定 1 个目标（初始优先更大框）
+- 目标延续：优先通过 IoU/中心距离匹配当前目标，短时丢失可容忍
+- 切换条件：仅当候选手框面积持续大于当前目标（默认 `1.25x`）才允许切换
+- 防抖机制：需连续满足若干帧（默认 `6` 帧）才切换
+- 冷却机制：切换后进入冷却（默认 `10` 帧）防止来回跳变
+
+高级策略（Phase C，暂未启用）：
+
+- “快速靠近”提前切换（基于面积增长率）建议在上述策略稳定后再加
+
+---
+
 ## 已知限制与后续优化方向
 
 - 当前模型在本场景置信度偏低，需要 `--conf 0.10` 左右。
 - 会有一定误检（尤其在手部不明显、画面纹理复杂时）。
 - 若要提升稳定性，建议后续做：
   - 更贴近你相机数据域的微调训练（手部数据集 + 现场采样）
-  - 时序稳定策略（跨帧跟踪/平滑）
   - 引入关键点模型二级确认（先检测手框，再做 hand landmarks）
 
 ---
@@ -186,6 +208,9 @@ sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
 - `rknn/export_hand_yolov8_onnx.py`
 - `rknn/convert_hand_onnx_to_rknn.py`
 - `src/ai/detector.cpp`（logit 兼容后处理）
+- `src/ai/hand_target_tracker.h`
+- `src/ai/hand_target_tracker.cpp`
+- `src/main.cpp`（单目标跟踪接入）
 
 ---
 
