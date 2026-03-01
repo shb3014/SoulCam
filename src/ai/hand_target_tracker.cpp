@@ -63,6 +63,11 @@ void HandTargetTracker::reset() {
     st_ = State{};
 }
 
+void HandTargetTracker::set_config(const HandTargetTrackerConfig& cfg, bool reset_state) {
+    cfg_ = cfg;
+    if (reset_state) reset();
+}
+
 std::vector<int> HandTargetTracker::collect_candidates(const std::vector<Detection>& dets) const {
     std::vector<int> preferred;
     std::vector<int> all;
@@ -161,6 +166,8 @@ std::vector<Detection> HandTargetTracker::update(const std::vector<Detection>& d
         st_.cooldown_frames = 0;
         st_.has_pending = false;
         st_.pending_hold = 0;
+        st_.pending_prev_area = 0.0f;
+        st_.pending_fast_hold = 0;
         out.push_back(st_.target);
         return out;
     }
@@ -170,6 +177,8 @@ std::vector<Detection> HandTargetTracker::update(const std::vector<Detection>& d
         st_.lost_frames++;
         st_.has_pending = false;
         st_.pending_hold = 0;
+        st_.pending_prev_area = 0.0f;
+        st_.pending_fast_hold = 0;
         if (st_.lost_frames > cfg_.lost_ttl_frames) {
             reset();
             return out;
@@ -186,45 +195,75 @@ std::vector<Detection> HandTargetTracker::update(const std::vector<Detection>& d
         st_.cooldown_frames--;
         st_.has_pending = false;
         st_.pending_hold = 0;
+        st_.pending_prev_area = 0.0f;
+        st_.pending_fast_hold = 0;
         out.push_back(st_.target);
         return out;
     }
 
     const int switch_idx = find_switch_candidate(detections, candidates, current_idx);
-    bool switched = false;
     if (switch_idx >= 0) {
         const auto& challenger = detections[switch_idx];
         const float challenger_area = box_area(challenger);
         const bool bigger_enough = challenger_area > (st_.target_area * cfg_.switch_area_ratio);
+        const bool near_enough = challenger_area >= (st_.target_area * cfg_.fast_approach_area_ratio);
 
-        if (bigger_enough) {
-            if (st_.has_pending && same_detection(st_.pending, challenger)) {
-                st_.pending_hold++;
-                st_.pending = challenger;
-            } else {
-                st_.has_pending = true;
-                st_.pending = challenger;
-                st_.pending_hold = 1;
-            }
-
-            if (st_.pending_hold >= cfg_.switch_hold_frames) {
-                st_.target = challenger;
-                st_.target_area = challenger_area;
-                st_.cooldown_frames = cfg_.switch_cooldown_frames;
-                st_.has_pending = false;
-                st_.pending_hold = 0;
-                switched = true;
-            }
-        } else {
+        if (!bigger_enough && !cfg_.enable_fast_approach_switch) {
             st_.has_pending = false;
             st_.pending_hold = 0;
+            st_.pending_prev_area = 0.0f;
+            st_.pending_fast_hold = 0;
+            out.push_back(st_.target);
+            return out;
+        }
+
+        const bool same_pending = st_.has_pending && same_detection(st_.pending, challenger);
+        float growth = 0.0f;
+        if (same_pending && st_.pending_prev_area > 1.0f) {
+            growth = (challenger_area - st_.pending_prev_area) / st_.pending_prev_area;
+        }
+
+        if (same_pending) {
+            if (bigger_enough) {
+                st_.pending_hold++;
+            } else {
+                st_.pending_hold = 0;
+            }
+
+            if (cfg_.enable_fast_approach_switch && near_enough &&
+                growth >= cfg_.fast_approach_min_growth) {
+                st_.pending_fast_hold++;
+            } else {
+                st_.pending_fast_hold = 0;
+            }
+        } else {
+            st_.has_pending = true;
+            st_.pending_hold = bigger_enough ? 1 : 0;
+            st_.pending_fast_hold = 0;
+        }
+
+        st_.pending = challenger;
+        st_.pending_prev_area = challenger_area;
+
+        const bool ready_normal = st_.pending_hold >= cfg_.switch_hold_frames;
+        const bool ready_fast = cfg_.enable_fast_approach_switch &&
+                                st_.pending_fast_hold >= cfg_.fast_approach_hold_frames;
+        if (ready_normal || ready_fast) {
+            st_.target = challenger;
+            st_.target_area = challenger_area;
+            st_.cooldown_frames = cfg_.switch_cooldown_frames;
+            st_.has_pending = false;
+            st_.pending_hold = 0;
+            st_.pending_prev_area = 0.0f;
+            st_.pending_fast_hold = 0;
         }
     } else {
         st_.has_pending = false;
         st_.pending_hold = 0;
+        st_.pending_prev_area = 0.0f;
+        st_.pending_fast_hold = 0;
     }
 
-    (void)switched;
     out.push_back(st_.target);
     return out;
 }

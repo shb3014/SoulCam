@@ -130,6 +130,13 @@ struct Config {
     // Slot 0 is always the primary model (from --model / rknn).
     // Slots 1+ are extra models (from --model2, --model3, etc.)
     std::vector<ModelSlotConfig> extra_models;
+
+    // Advanced hand-target switching (Phase 3).
+    // Disabled by default; applies only when hand single-target tracker is enabled.
+    bool         hand_fast_switch = false;
+    float        hand_fast_growth = 0.18f;
+    float        hand_fast_area_ratio = 0.90f;
+    int          hand_fast_hold_frames = 3;
 };
 
 // ---------------------------------------------------------------------------

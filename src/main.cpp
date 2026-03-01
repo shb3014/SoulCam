@@ -117,6 +117,15 @@ static bool should_enable_hand_target_tracker(const sc::Config& cfg) {
     return has_hand && (non_empty_count == 1);
 }
 
+static sc::HandTargetTrackerConfig make_hand_tracker_config(const sc::Config& cfg) {
+    sc::HandTargetTrackerConfig tc;
+    tc.enable_fast_approach_switch = cfg.hand_fast_switch;
+    tc.fast_approach_min_growth = cfg.hand_fast_growth;
+    tc.fast_approach_area_ratio = cfg.hand_fast_area_ratio;
+    tc.fast_approach_hold_frames = std::max(1, cfg.hand_fast_hold_frames);
+    return tc;
+}
+
 // ---------------------------------------------------------------------------
 // CLI argument parsing
 // ---------------------------------------------------------------------------
@@ -162,6 +171,10 @@ static void print_usage(const char* prog) {
         "  --conf-thresh F    Detection confidence (default: 0.25)\n"
         "  --nms-thresh F     NMS threshold       (default: 0.45)\n"
         "  --labels L         Comma-separated class labels (e.g. \"hand\")\n"
+        "  --hand-fast-switch Enable advanced fast-approach target switching\n"
+        "  --hand-fast-growth F   Min relative area growth per frame (default: 0.18)\n"
+        "  --hand-fast-area-ratio F  Min challenger/current area ratio (default: 0.90)\n"
+        "  --hand-fast-hold N   Consecutive fast-growth frames to switch (default: 3)\n"
         "\n"
         "Multi-model pipeline:\n"
         "  --model2 PATH      Second model (slot 1)\n"
@@ -232,6 +245,10 @@ static sc::Config parse_args(int argc, char** argv) {
         {"conf-thresh",   required_argument, nullptr, 'c'},
         {"nms-thresh",    required_argument, nullptr, 'n'},
         {"labels",        required_argument, nullptr, 'L'},
+        {"hand-fast-switch", no_argument,    nullptr, 16},
+        {"hand-fast-growth", required_argument, nullptr, 17},
+        {"hand-fast-area-ratio", required_argument, nullptr, 18},
+        {"hand-fast-hold", required_argument, nullptr, 19},
         {"mainpath",      required_argument, nullptr, 1},
         {"selfpath",      required_argument, nullptr, 2},
         {"media",         required_argument, nullptr, 3},
@@ -276,6 +293,10 @@ static sc::Config parse_args(int argc, char** argv) {
             case 'c': cfg.rknn.conf_threshold = atof(optarg); break;
             case 'n': cfg.rknn.nms_threshold  = atof(optarg); break;
             case 'L': cfg.rknn.labels         = optarg;       break;
+            case 16:  cfg.hand_fast_switch    = true;         break;
+            case 17:  cfg.hand_fast_growth    = static_cast<float>(atof(optarg)); break;
+            case 18:  cfg.hand_fast_area_ratio = static_cast<float>(atof(optarg)); break;
+            case 19:  cfg.hand_fast_hold_frames = atoi(optarg); break;
             case 1:   cfg.isp.mainpath       = optarg;       break;
             case 2:   cfg.isp.selfpath       = optarg;       break;
             case 3:   cfg.isp.media_dev      = optarg;       break;
@@ -314,6 +335,11 @@ static sc::Config parse_args(int argc, char** argv) {
         slot.skip_frames         = model3_skip;
         cfg.extra_models.push_back(std::move(slot));
     }
+
+    // Clamp advanced hand-switch parameters to safe ranges.
+    if (cfg.hand_fast_growth < 0.0f) cfg.hand_fast_growth = 0.0f;
+    if (cfg.hand_fast_area_ratio < 0.0f) cfg.hand_fast_area_ratio = 0.0f;
+    if (cfg.hand_fast_hold_frames < 1) cfg.hand_fast_hold_frames = 1;
 
     return cfg;
 }
@@ -635,6 +661,7 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
 int main(int argc, char** argv) {
     sc::Config cfg = parse_args(argc, argv);
     g_enable_hand_tracker = should_enable_hand_target_tracker(cfg);
+    g_hand_tracker.set_config(make_hand_tracker_config(cfg), true);
 
     if (cfg.verbose) {
         sc::log_set_level(sc::LogLevel::DEBUG);
@@ -644,6 +671,11 @@ int main(int argc, char** argv) {
     SC_LOG_INFO("Hand target tracker: %s (labels=\"%s\")",
                 g_enable_hand_tracker ? "enabled" : "disabled",
                 cfg.rknn.labels.c_str());
+    SC_LOG_INFO("Hand fast switch (phase3): %s (growth>=%.2f, ratio>=%.2f, hold=%d)",
+                cfg.hand_fast_switch ? "enabled" : "disabled",
+                cfg.hand_fast_growth,
+                cfg.hand_fast_area_ratio,
+                cfg.hand_fast_hold_frames);
 
     // --- Set GStreamer plugin path BEFORE gst_init() ---
     // rgaconvert lives in a custom path; GStreamer scans plugins at init time.

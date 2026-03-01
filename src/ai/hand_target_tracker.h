@@ -26,6 +26,13 @@ struct HandTargetTrackerConfig {
     float switch_area_ratio = 1.25f;
     int switch_hold_frames = 6;
     int switch_cooldown_frames = 10;
+
+    // Advanced feature (Phase 3): allow earlier switch when another hand
+    // approaches fast (area grows quickly) and is close to current target size.
+    bool enable_fast_approach_switch = false;
+    float fast_approach_min_growth = 0.18f;     // per-frame relative growth
+    float fast_approach_area_ratio = 0.90f;     // challenger >= ratio * current
+    int fast_approach_hold_frames = 3;          // consecutive growth frames
 };
 
 class HandTargetTracker {
@@ -33,6 +40,7 @@ public:
     explicit HandTargetTracker(const HandTargetTrackerConfig& cfg = {});
 
     void reset();
+    void set_config(const HandTargetTrackerConfig& cfg, bool reset_state = true);
 
     // Returns 0 or 1 detection (single target policy).
     std::vector<Detection> update(const std::vector<Detection>& detections);
@@ -48,6 +56,8 @@ private:
         bool has_pending = false;
         Detection pending{};
         int pending_hold = 0;
+        float pending_prev_area = 0.0f;
+        int pending_fast_hold = 0;
     };
 
     int choose_initial_target(const std::vector<Detection>& dets,

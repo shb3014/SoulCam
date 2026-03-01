@@ -12,6 +12,8 @@
 - 该模型在 SoulCam 中显示：`1 inputs, 9 outputs`, `quant=yes`, `classes=1`。
 - 当前场景建议阈值：`--conf 0.10`（能稳定出现检测）。
 - 要求：`src/ai/detector.cpp` 需使用“logit 兼容后处理”版本（本仓库已更新）。
+- 已实现手部单目标跟踪（Phase A + B），多手场景下仅输出 1 个目标手。
+- 已实现高级快速切换（Phase C），默认关闭，可通过 `--hand-fast-switch` 启用。
 
 > 说明：单类别手模型的分数分布偏窄，阈值通常要比 COCO 模型更低。
 
@@ -146,6 +148,45 @@ sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
 
 ---
 
+## 运行模式与推荐命令
+
+### 1) 默认单目标跟踪（Phase A + B）
+
+```bash
+sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
+  "cd /home/ubuntu/SoulCam && sudo systemctl stop soulcam || true && \
+   sudo ./build/soulcam --ai \
+     --model /home/ubuntu/models/hand_yolov8n_rk3566_i8_20260301.rknn \
+     --labels hand --conf 0.10 -v"
+```
+
+### 2) 启用高级快速切换（Phase C，默认参数）
+
+```bash
+sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
+  "cd /home/ubuntu/SoulCam && sudo systemctl stop soulcam || true && \
+   sudo ./build/soulcam --ai \
+     --model /home/ubuntu/models/hand_yolov8n_rk3566_i8_20260301.rknn \
+     --labels hand --conf 0.10 -v \
+     --hand-fast-switch"
+```
+
+### 3) 启用高级快速切换（自定义参数示例）
+
+```bash
+sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
+  "cd /home/ubuntu/SoulCam && sudo systemctl stop soulcam || true && \
+   sudo ./build/soulcam --ai \
+     --model /home/ubuntu/models/hand_yolov8n_rk3566_i8_20260301.rknn \
+     --labels hand --conf 0.10 -v \
+     --hand-fast-switch \
+     --hand-fast-growth 0.16 \
+     --hand-fast-area-ratio 0.88 \
+     --hand-fast-hold 2"
+```
+
+---
+
 ## 快速验收命令
 
 ```bash
@@ -182,9 +223,38 @@ sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
 - 防抖机制：需连续满足若干帧（默认 `6` 帧）才切换
 - 冷却机制：切换后进入冷却（默认 `10` 帧）防止来回跳变
 
-高级策略（Phase C，暂未启用）：
+高级策略（Phase C，可选启用，默认关闭）：
 
-- “快速靠近”提前切换（基于面积增长率）建议在上述策略稳定后再加
+- “快速靠近”提前切换（基于面积增长率）已实现
+- 启用开关：`--hand-fast-switch`
+- 可调参数：
+  - `--hand-fast-growth`（默认 `0.18`，面积相对增长阈值）
+  - `--hand-fast-area-ratio`（默认 `0.90`，候选面积/当前面积比值阈值）
+  - `--hand-fast-hold`（默认 `3`，连续满足帧数）
+
+---
+
+## 跟踪参数说明（简版）
+
+- `--labels hand`
+  - 单目标手跟踪生效前提（当前实现要求单标签 `hand`）。
+- `--hand-fast-switch`
+  - 开启 Phase C；不开启时仅执行 Phase A + B 策略。
+- `--hand-fast-growth`
+  - 候选目标每帧面积相对增长阈值，越小越敏感，越大越保守。
+- `--hand-fast-area-ratio`
+  - 候选面积与当前面积比阈值，越小越容易提前切换，越大越稳。
+- `--hand-fast-hold`
+  - 连续满足快速条件的帧数，越小响应越快，越大抖动越小。
+
+---
+
+## 代码同步与设备构建状态（本次）
+
+- 本次改动已同步到：`/home/ubuntu/SoulCam`
+- 设备端已执行：`cmake -S src -B build && cmake --build build -j4`
+- 构建成功：`[100%] Built target soulcam`
+- 生成程序：`/home/ubuntu/SoulCam/build/soulcam`
 
 ---
 
