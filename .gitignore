@@ -6,3 +6,4 @@ old/
 device_backups/
 ubuntu-rockchip-2.4.0/
 rockchip-iqfiles-main/
+/models/calib/

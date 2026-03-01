@@ -85,6 +85,8 @@ struct RknnConfig {
     std::string model_path;             // e.g. "rk3566/yolov8n.rknn"
     float       conf_threshold = 0.25f;
     float       nms_threshold  = 0.45f;
+    std::string labels;                 // comma-separated labels (e.g. "hand")
+                                        // empty = auto-detect from model (COCO 80)
 };
 
 // ---------------------------------------------------------------------------

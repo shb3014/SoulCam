@@ -123,6 +123,7 @@ static void print_usage(const char* prog) {
         "  --ai-fps F         AI capture FPS      (default: 30)\n"
         "  --conf-thresh F    Detection confidence (default: 0.25)\n"
         "  --nms-thresh F     NMS threshold       (default: 0.45)\n"
+        "  --labels L         Comma-separated class labels (e.g. \"hand\")\n"
         "\n"
         "Multi-model pipeline:\n"
         "  --model2 PATH      Second model (slot 1)\n"
@@ -192,6 +193,7 @@ static sc::Config parse_args(int argc, char** argv) {
         {"ai-fps",        required_argument, nullptr, 'F'},
         {"conf-thresh",   required_argument, nullptr, 'c'},
         {"nms-thresh",    required_argument, nullptr, 'n'},
+        {"labels",        required_argument, nullptr, 'L'},
         {"mainpath",      required_argument, nullptr, 1},
         {"selfpath",      required_argument, nullptr, 2},
         {"media",         required_argument, nullptr, 3},
@@ -235,6 +237,7 @@ static sc::Config parse_args(int argc, char** argv) {
             case 'F': cfg.ai.fps             = atoi(optarg); break;
             case 'c': cfg.rknn.conf_threshold = atof(optarg); break;
             case 'n': cfg.rknn.nms_threshold  = atof(optarg); break;
+            case 'L': cfg.rknn.labels         = optarg;       break;
             case 1:   cfg.isp.mainpath       = optarg;       break;
             case 2:   cfg.isp.selfpath       = optarg;       break;
             case 3:   cfg.isp.media_dev      = optarg;       break;

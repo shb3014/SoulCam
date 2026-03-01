@@ -25,7 +25,7 @@
 
 namespace sc {
 
-// ---- COCO class labels (80 classes) ----
+// ---- COCO class labels (80 classes, used as default) ----
 static const char* COCO_LABELS[] = {
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
@@ -41,8 +41,24 @@ static const char* COCO_LABELS[] = {
     "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
     "scissors", "teddy bear", "hair drier", "toothbrush"
 };
-static constexpr int NUM_LABELS    = 80;
+static constexpr int COCO_NUM_LABELS = 80;
 static constexpr int MAX_DETECT    = 128;
+
+static std::vector<std::string> parse_label_string(const std::string& s) {
+    std::vector<std::string> out;
+    if (s.empty()) return out;
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t end = s.find(',', start);
+        if (end == std::string::npos) end = s.size();
+        std::string tok = s.substr(start, end - start);
+        while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
+        while (!tok.empty() && tok.back() == ' ')  tok.pop_back();
+        if (!tok.empty()) out.push_back(std::move(tok));
+        start = end + 1;
+    }
+    return out;
+}
 
 // =========================================================================
 // RKNN implementation
@@ -62,6 +78,18 @@ struct Detector {
     bool is_quant       = false;
     float conf_thresh   = 0.25f;
     float nms_thresh    = 0.45f;
+
+    int  num_labels     = COCO_NUM_LABELS;
+    std::vector<std::string> custom_labels;
+
+    const char* label_for(int cid) const {
+        if (cid < 0) return "?";
+        if (!custom_labels.empty()) {
+            return (cid < static_cast<int>(custom_labels.size()))
+                ? custom_labels[cid].c_str() : "?";
+        }
+        return (cid < COCO_NUM_LABELS) ? COCO_LABELS[cid] : "?";
+    }
 };
 
 // ---- helpers ----
@@ -88,6 +116,16 @@ static int8_t qnt_f32_to_affine(float f32, int32_t zp, float scale) {
 }
 static float deqnt_affine_to_f32(int8_t qnt, int32_t zp, float scale) {
     return (static_cast<float>(qnt) - static_cast<float>(zp)) * scale;
+}
+static float sigmoid_f32(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+static float conf_to_logit(float p) {
+    const float eps = 1e-6f;
+    float pc = p;
+    if (pc < eps) pc = eps;
+    if (pc > 1.0f - eps) pc = 1.0f - eps;
+    return logf(pc / (1.0f - pc));
 }
 
 // ---- IoU + NMS ----
@@ -239,12 +277,15 @@ static int process_i8(int8_t* box_t, int32_t box_zp, float box_sc,
                        int8_t* score_t, int32_t score_zp, float score_sc,
                        int8_t* score_sum_t, int32_t ss_zp, float ss_sc,
                        int gh, int gw, int stride, int dfl_len,
+                       int num_labels,
                        std::vector<float>& boxes,
                        std::vector<float>& probs,
                        std::vector<int>& cls,
-                       float thresh) {
+                       float thresh,
+                       bool score_is_logit) {
     int valid = 0, glen = gh * gw;
-    int8_t thr_i8 = qnt_f32_to_affine(thresh, score_zp, score_sc);
+    const float score_thr = score_is_logit ? conf_to_logit(thresh) : thresh;
+    int8_t thr_i8 = qnt_f32_to_affine(score_thr, score_zp, score_sc);
     int8_t ss_thr  = qnt_f32_to_affine(thresh, ss_zp, ss_sc);
     float before_dfl[64]; // stack-allocated (max dfl_len*4 = 16*4 = 64)
 
@@ -274,7 +315,7 @@ static int process_i8(int8_t* box_t, int32_t box_zp, float box_sc,
         int8x16_t max_sc  = vdupq_n_s8(-128);
         uint8x16_t max_cls = vdupq_n_u8(0);
 
-        for (int c = 0; c < NUM_LABELS; c++) {
+        for (int c = 0; c < num_labels; c++) {
             int8x16_t sc = vld1q_s8(&score_t[c * glen + cell]);
             uint8x16_t gt = vcgtq_s8(sc, max_sc);
             max_cls = vbslq_u8(gt, vdupq_n_u8(static_cast<uint8_t>(c)), max_cls);
@@ -314,7 +355,9 @@ static int process_i8(int8_t* box_t, int32_t box_zp, float box_sc,
             float y2 = ( box[3] + ci + 0.5f) * stride;
             boxes.push_back(x1); boxes.push_back(y1);
             boxes.push_back(x2 - x1); boxes.push_back(y2 - y1);
-            probs.push_back(deqnt_affine_to_f32(sc_arr[k], score_zp, score_sc));
+            float score = deqnt_affine_to_f32(sc_arr[k], score_zp, score_sc);
+            if (score_is_logit) score = sigmoid_f32(score);
+            probs.push_back(score);
             cls.push_back(static_cast<int>(cls_arr[k]));
             valid++;
         }
@@ -329,7 +372,7 @@ static int process_i8(int8_t* box_t, int32_t box_zp, float box_sc,
         int8_t max_sc = static_cast<int8_t>(-score_zp);
         int max_c = -1;
         int off2 = cell;
-        for (int c = 0; c < NUM_LABELS; c++) {
+        for (int c = 0; c < num_labels; c++) {
             if (score_t[off2] > thr_i8 && score_t[off2] > max_sc) {
                 max_sc = score_t[off2]; max_c = c;
             }
@@ -351,7 +394,9 @@ static int process_i8(int8_t* box_t, int32_t box_zp, float box_sc,
         float y2 = ( box[3] + ci + 0.5f) * stride;
         boxes.push_back(x1); boxes.push_back(y1);
         boxes.push_back(x2 - x1); boxes.push_back(y2 - y1);
-        probs.push_back(deqnt_affine_to_f32(max_sc, score_zp, score_sc));
+        float score = deqnt_affine_to_f32(max_sc, score_zp, score_sc);
+        if (score_is_logit) score = sigmoid_f32(score);
+        probs.push_back(score);
         cls.push_back(max_c);
         valid++;
     }
@@ -362,24 +407,27 @@ static int process_i8(int8_t* box_t, int32_t box_zp, float box_sc,
 
 static int process_fp32(float* box_t, float* score_t, float* score_sum_t,
                          int gh, int gw, int stride, int dfl_len,
+                         int num_labels,
                          std::vector<float>& boxes,
                          std::vector<float>& probs,
                          std::vector<int>& cls,
-                         float thresh) {
+                         float thresh,
+                         bool score_is_logit) {
     int valid = 0, glen = gh * gw;
+    const float score_thr = score_is_logit ? conf_to_logit(thresh) : thresh;
     for (int i = 0; i < gh; i++) {
         for (int j = 0; j < gw; j++) {
             int off = i * gw + j;
             if (score_sum_t && score_sum_t[off] < thresh) continue;
             float max_sc = 0; int max_c = -1;
             int off2 = off;
-            for (int c = 0; c < NUM_LABELS; c++) {
-                if (score_t[off2] > thresh && score_t[off2] > max_sc) {
+            for (int c = 0; c < num_labels; c++) {
+                if (score_t[off2] > score_thr && score_t[off2] > max_sc) {
                     max_sc = score_t[off2]; max_c = c;
                 }
                 off2 += glen;
             }
-            if (max_sc <= thresh) continue;
+            if (max_sc <= score_thr) continue;
             off2 = off;
             float before_dfl[64]; // stack (max dfl_len*4 = 16*4 = 64)
             for (int k = 0; k < dfl_len * 4; k++) {
@@ -393,7 +441,7 @@ static int process_fp32(float* box_t, float* score_t, float* score_sum_t,
             float y2 = ( box[3] + i + 0.5f) * stride;
             boxes.push_back(x1); boxes.push_back(y1);
             boxes.push_back(x2 - x1); boxes.push_back(y2 - y1);
-            probs.push_back(max_sc);
+            probs.push_back(score_is_logit ? sigmoid_f32(max_sc) : max_sc);
             cls.push_back(max_c);
             valid++;
         }
@@ -455,9 +503,23 @@ Detector* detector_create(const RknnConfig& cfg) {
     det->is_quant = (det->output_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC &&
                      det->output_attrs[0].type != RKNN_TENSOR_FLOAT16);
 
-    SC_LOG_INFO("Model input: %dx%dx%d, quant=%s",
+    // Derive num_labels from the score tensor (output index 1).
+    // Score tensor shape is [1, num_classes, H, W] in NCHW.
+    int per_branch = det->io_num.n_output / 3;
+    if (per_branch >= 2 && det->output_attrs[1].n_dims == 4) {
+        det->num_labels = static_cast<int>(det->output_attrs[1].dims[1]);
+    }
+
+    // Load custom labels if provided
+    det->custom_labels = parse_label_string(cfg.labels);
+    if (!det->custom_labels.empty()) {
+        SC_LOG_INFO("Custom labels (%zu): %s", det->custom_labels.size(),
+                    cfg.labels.c_str());
+    }
+
+    SC_LOG_INFO("Model input: %dx%dx%d, quant=%s, classes=%d",
                 det->model_width, det->model_height, det->model_channels,
-                det->is_quant ? "yes" : "no");
+                det->is_quant ? "yes" : "no", det->num_labels);
 #ifdef __ARM_NEON
     SC_LOG_INFO("NEON SIMD: enabled (batch score scan + fast DFL softmax)");
 #else
@@ -514,6 +576,10 @@ int detector_infer(Detector* det,
     int model_h = det->model_height;
     int dfl_len = det->output_attrs[0].dims[1] / 4;
     int per_branch = det->io_num.n_output / 3;
+    // 9-output YOLOv8 models in this project expose class logits in score tensor
+    // and sigmoid(score) in score_sum tensor. 6-output models typically export
+    // score directly as probability.
+    bool score_is_logit = (per_branch == 3);
 
     for (int b = 0; b < 3; b++) {
         int box_idx   = b * per_branch;
@@ -537,14 +603,16 @@ int detector_infer(Detector* det,
                 det->output_attrs[score_idx].zp, det->output_attrs[score_idx].scale,
                 (int8_t*)score_sum, ss_zp, ss_sc,
                 gh, gw, stride, dfl_len,
-                filterBoxes, objProbs, classIds, det->conf_thresh);
+                det->num_labels,
+                filterBoxes, objProbs, classIds, det->conf_thresh, score_is_logit);
         } else {
             validCount += process_fp32(
                 (float*)outputs[box_idx].buf,
                 (float*)outputs[score_idx].buf,
                 (float*)score_sum,
                 gh, gw, stride, dfl_len,
-                filterBoxes, objProbs, classIds, det->conf_thresh);
+                det->num_labels,
+                filterBoxes, objProbs, classIds, det->conf_thresh, score_is_logit);
         }
     }
 
@@ -574,7 +642,7 @@ int detector_infer(Detector* det,
 
             Detection d;
             d.cls_id     = cid;
-            d.label      = (cid >= 0 && cid < NUM_LABELS) ? COCO_LABELS[cid] : "?";
+            d.label      = det->label_for(cid);
             d.confidence = objProbs[i];
             d.left       = clamp_i(x1 / sx, 0, width);
             d.top        = clamp_i(y1 / sy, 0, height);
