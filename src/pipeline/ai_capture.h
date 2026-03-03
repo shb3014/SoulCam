@@ -25,6 +25,7 @@
 #include "ai/detector.h"
 
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace sc {
@@ -58,10 +59,16 @@ int ai_capture_remove_model(AiCapture* cap, int slot_idx);
 // Enable or disable a model slot at runtime.
 void ai_capture_enable_model(AiCapture* cap, int slot_idx, bool enable);
 
+// Update slot run weight (weighted scheduler share). Returns 0 on success.
+int ai_capture_set_model_weight(AiCapture* cap, int slot_idx, int run_weight);
+
 // Get the number of model slots.
 int ai_capture_model_count(AiCapture* cap);
 
 // Get info about a model slot.
 ModelSlotConfig ai_capture_get_model_info(AiCapture* cap, int slot_idx);
+
+// Get multiline model debug status report.
+std::string ai_capture_debug_status(AiCapture* cap);
 
 }  // namespace sc

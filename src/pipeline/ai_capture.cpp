@@ -190,7 +190,11 @@ AiCapture* ai_capture_start(const Config& cfg, AiCallback cb) {
     // Initialize multi-model pipeline
     int model_w = 0, model_h = 0, model_c = 0;
     if (!cfg.rknn.model_path.empty()) {
-        cap->model_pipe = model_pipeline_create(cfg.rknn, cfg.extra_models);
+        ModelPipelineOptions mp_opts;
+        mp_opts.weighted_scheduler = cfg.weighted_scheduler;
+        mp_opts.max_models_per_frame = cfg.max_models_per_frame;
+        mp_opts.primary_model_weight = cfg.primary_model_weight;
+        cap->model_pipe = model_pipeline_create(cfg.rknn, cfg.extra_models, mp_opts);
         if (!cap->model_pipe) {
             SC_LOG_ERROR("Failed to create model pipeline -- AI will capture but not infer");
         } else {
@@ -296,6 +300,11 @@ void ai_capture_enable_model(AiCapture* cap, int slot_idx, bool enable) {
     model_pipeline_enable_model(cap->model_pipe, slot_idx, enable);
 }
 
+int ai_capture_set_model_weight(AiCapture* cap, int slot_idx, int run_weight) {
+    if (!cap || !cap->model_pipe) return -1;
+    return model_pipeline_set_slot_weight(cap->model_pipe, slot_idx, run_weight);
+}
+
 int ai_capture_model_count(AiCapture* cap) {
     if (!cap || !cap->model_pipe) return 0;
     return model_pipeline_count(cap->model_pipe);
@@ -304,6 +313,11 @@ int ai_capture_model_count(AiCapture* cap) {
 ModelSlotConfig ai_capture_get_model_info(AiCapture* cap, int slot_idx) {
     if (!cap || !cap->model_pipe) return {};
     return model_pipeline_get_slot_info(cap->model_pipe, slot_idx);
+}
+
+std::string ai_capture_debug_status(AiCapture* cap) {
+    if (!cap || !cap->model_pipe) return "AI capture/model pipeline not running";
+    return model_pipeline_debug_status(cap->model_pipe);
 }
 
 }  // namespace sc

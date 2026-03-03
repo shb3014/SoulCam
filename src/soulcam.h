@@ -96,6 +96,7 @@ struct ModelSlotConfig {
     std::string name;                   // Human-readable name (e.g. "yolov8n")
     RknnConfig  rknn;                   // Model path + thresholds
     int         skip_frames = 0;        // Run every N+1 frames (0 = every frame)
+    int         run_weight  = 1;        // Weighted scheduler share (relative)
     bool        enabled     = true;     // Can be toggled at runtime
 };
 
@@ -130,6 +131,22 @@ struct Config {
     // Slot 0 is always the primary model (from --model / rknn).
     // Slots 1+ are extra models (from --model2, --model3, etc.)
     std::vector<ModelSlotConfig> extra_models;
+
+    // Weighted model scheduler (optional).
+    // If enabled, only up to max_models_per_frame are run per frame,
+    // selected by weighted round-robin across loaded+enabled slots.
+    bool         weighted_scheduler = false;
+    int          max_models_per_frame = 1;
+    int          primary_model_weight = 1;
+
+    // Test-only adaptive scheduling policy:
+    // prefer hand model when hand is present, otherwise prefer person model.
+    bool         test_adaptive_hand_person = false;
+    int          test_hand_slot = 1;
+    int          test_person_slot = 0;
+    int          test_weight_high = 10;
+    int          test_weight_low = 1;
+    int          test_no_hand_frames_to_fallback = 8;
 
     // Advanced hand-target switching (Phase 3).
     // Disabled by default; applies only when hand single-target tracker is enabled.

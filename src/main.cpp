@@ -126,6 +126,80 @@ static sc::HandTargetTrackerConfig make_hand_tracker_config(const sc::Config& cf
     return tc;
 }
 
+static sc::HandTargetTrackerConfig make_label_only_tracker_config(const std::string& label) {
+    sc::HandTargetTrackerConfig tc;
+    tc.preferred_label = label;
+    // In test policy we pre-filter detections by model slot, so label fallback
+    // should stay enabled to avoid dependence on model label strings.
+    tc.fallback_to_all_labels = true;
+    return tc;
+}
+
+struct AdaptiveHandPersonTestConfig {
+    bool enabled = false;
+    int hand_slot = 1;
+    int person_slot = 0;
+    int high_weight = 10;
+    int low_weight = 1;
+    int no_hand_frames_to_fallback = 8;
+};
+
+enum class AdaptiveTestMode {
+    Neutral,
+    HandPreferred,
+    PersonPreferred,
+};
+
+static AdaptiveHandPersonTestConfig g_adaptive_test_cfg{};
+static AdaptiveTestMode g_adaptive_test_mode = AdaptiveTestMode::Neutral;
+static int g_adaptive_no_hand_frames = 0;
+static sc::AiCapture* g_ai_for_policy = nullptr;
+static sc::HandTargetTracker g_hand_policy_tracker(make_label_only_tracker_config("hand"));
+static sc::HandTargetTracker g_person_policy_tracker(make_label_only_tracker_config("person"));
+
+static std::vector<sc::Detection> dets_for_slot(const std::vector<sc::Detection>& dets,
+                                                int slot_id) {
+    std::vector<sc::Detection> out;
+    if (slot_id < 0) return out;
+    out.reserve(dets.size());
+    for (const auto& d : dets) {
+        if (d.model_id == slot_id) out.push_back(d);
+    }
+    return out;
+}
+
+static void apply_adaptive_test_weights_if_needed(AdaptiveTestMode mode) {
+    if (!g_adaptive_test_cfg.enabled || !g_ai_for_policy) return;
+
+    int hand_w = g_adaptive_test_cfg.low_weight;
+    int person_w = g_adaptive_test_cfg.low_weight;
+    bool hand_enable = true;
+    bool person_enable = true;
+    if (mode == AdaptiveTestMode::HandPreferred) {
+        hand_w = g_adaptive_test_cfg.high_weight;
+        // When hand is active, stop human inference to avoid periodic jump.
+        person_enable = false;
+    } else if (mode == AdaptiveTestMode::PersonPreferred) {
+        person_w = g_adaptive_test_cfg.high_weight;
+    } else {
+        hand_w = 1;
+        person_w = 1;
+    }
+
+    sc::ai_capture_enable_model(g_ai_for_policy, g_adaptive_test_cfg.hand_slot, hand_enable);
+    sc::ai_capture_enable_model(g_ai_for_policy, g_adaptive_test_cfg.person_slot, person_enable);
+    sc::ai_capture_set_model_weight(g_ai_for_policy, g_adaptive_test_cfg.hand_slot, hand_w);
+    sc::ai_capture_set_model_weight(g_ai_for_policy, g_adaptive_test_cfg.person_slot, person_w);
+
+    const char* mode_name = "neutral";
+    if (mode == AdaptiveTestMode::HandPreferred) mode_name = "hand_preferred";
+    if (mode == AdaptiveTestMode::PersonPreferred) mode_name = "person_preferred";
+    SC_LOG_INFO("Adaptive test policy: mode=%s hand(slot=%d,en=%d,w=%d) person(slot=%d,en=%d,w=%d)",
+                mode_name,
+                g_adaptive_test_cfg.hand_slot, hand_enable ? 1 : 0, hand_w,
+                g_adaptive_test_cfg.person_slot, person_enable ? 1 : 0, person_w);
+}
+
 // ---------------------------------------------------------------------------
 // CLI argument parsing
 // ---------------------------------------------------------------------------
@@ -165,6 +239,7 @@ static void print_usage(const char* prog) {
         "Performance options:\n"
         "  --dmabuf           Use DMA-BUF io-mode for zero-copy ISP→RGA→MPP\n"
         "  --model PATH       Primary RKNN model (slot 0)\n"
+        "  --model-weight W   Primary model weighted-scheduler share (default: 1)\n"
         "  --ai-width W       AI capture width    (default: 640)\n"
         "  --ai-height H      AI capture height   (default: 480)\n"
         "  --ai-fps F         AI capture FPS      (default: 30)\n"
@@ -179,10 +254,20 @@ static void print_usage(const char* prog) {
         "Multi-model pipeline:\n"
         "  --model2 PATH      Second model (slot 1)\n"
         "  --model2-skip N    Run model 2 every N+1 frames (default: 0)\n"
+        "  --model2-weight W  Model 2 weighted-scheduler share (default: 1)\n"
         "  --model2-conf F    Model 2 confidence threshold\n"
         "  --model3 PATH      Third model (slot 2)\n"
         "  --model3-skip N    Run model 3 every N+1 frames (default: 0)\n"
+        "  --model3-weight W  Model 3 weighted-scheduler share (default: 1)\n"
         "  --model3-conf F    Model 3 confidence threshold\n"
+        "  --weighted-scheduler   Enable weighted model scheduler\n"
+        "  --max-models-per-frame N  Max models to run per frame in weighted mode\n"
+        "  --test-adaptive-hand-person  Test policy: prefer hand, fallback person\n"
+        "  --test-hand-slot N    Hand model slot index for test policy (default: 1)\n"
+        "  --test-person-slot N  Person model slot index for test policy (default: 0)\n"
+        "  --test-weight-high W  High weight in test policy (default: 10)\n"
+        "  --test-weight-low W   Low weight in test policy (default: 1)\n"
+        "  --test-no-hand-frames N  Frames without hand before person fallback (default: 8)\n"
         "\n"
         "Device options:\n"
         "  --mainpath DEV     Mainpath device     (default: /dev/video8)\n"
@@ -209,6 +294,8 @@ static void print_usage(const char* prog) {
         "      socat - UNIX-SENDTO:/tmp/soulcam_ctrl.sock\n"
         "  echo '{\"cmd\":\"enable_model\",\"slot\":1,\"enable\":false}' | \\\n"
         "      socat - UNIX-SENDTO:/tmp/soulcam_ctrl.sock\n"
+        "  echo '{\"cmd\":\"debug_models\"}' | \\\n"
+        "      socat - UNIX-SENDTO:/tmp/soulcam_ctrl.sock\n"
         "\n", prog);
 }
 
@@ -218,6 +305,7 @@ static sc::Config parse_args(int argc, char** argv) {
     // Temp holders for multi-model CLI args
     std::string model2_path, model3_path;
     int model2_skip = 0, model3_skip = 0;
+    int model2_weight = 1, model3_weight = 1;
     float model2_conf = 0.25f, model3_conf = 0.25f;
 
     static struct option long_opts[] = {
@@ -239,6 +327,7 @@ static sc::Config parse_args(int argc, char** argv) {
         {"snapshot-port", required_argument, nullptr, 'K'},
         {"dmabuf",        no_argument,       nullptr, 'D'},
         {"model",         required_argument, nullptr, 'M'},
+        {"model-weight",  required_argument, nullptr, 20},
         {"ai-width",      required_argument, nullptr, 'w'},
         {"ai-height",     required_argument, nullptr, 'x'},
         {"ai-fps",        required_argument, nullptr, 'F'},
@@ -258,9 +347,19 @@ static sc::Config parse_args(int argc, char** argv) {
         {"model2",        required_argument, nullptr, 10},
         {"model2-skip",   required_argument, nullptr, 11},
         {"model2-conf",   required_argument, nullptr, 12},
+        {"model2-weight", required_argument, nullptr, 21},
         {"model3",        required_argument, nullptr, 13},
         {"model3-skip",   required_argument, nullptr, 14},
         {"model3-conf",   required_argument, nullptr, 15},
+        {"model3-weight", required_argument, nullptr, 22},
+        {"weighted-scheduler", no_argument,  nullptr, 23},
+        {"max-models-per-frame", required_argument, nullptr, 24},
+        {"test-adaptive-hand-person", no_argument, nullptr, 25},
+        {"test-hand-slot", required_argument, nullptr, 26},
+        {"test-person-slot", required_argument, nullptr, 27},
+        {"test-weight-high", required_argument, nullptr, 28},
+        {"test-weight-low", required_argument, nullptr, 29},
+        {"test-no-hand-frames", required_argument, nullptr, 30},
         {"verbose",       no_argument,       nullptr, 'v'},
         {"help",          no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
@@ -287,6 +386,7 @@ static sc::Config parse_args(int argc, char** argv) {
             case 'K': cfg.snapshot_port     = atoi(optarg);  break;
             case 'D': cfg.use_dmabuf        = true;         break;
             case 'M': cfg.rknn.model_path    = optarg;       break;
+            case 20:  cfg.primary_model_weight = atoi(optarg); break;
             case 'w': cfg.ai.width           = atoi(optarg); break;
             case 'x': cfg.ai.height          = atoi(optarg); break;
             case 'F': cfg.ai.fps             = atoi(optarg); break;
@@ -306,9 +406,19 @@ static sc::Config parse_args(int argc, char** argv) {
             case 10:  model2_path = optarg;                  break;
             case 11:  model2_skip = atoi(optarg);            break;
             case 12:  model2_conf = static_cast<float>(atof(optarg)); break;
+            case 21:  model2_weight = atoi(optarg);          break;
             case 13:  model3_path = optarg;                  break;
             case 14:  model3_skip = atoi(optarg);            break;
             case 15:  model3_conf = static_cast<float>(atof(optarg)); break;
+            case 22:  model3_weight = atoi(optarg);          break;
+            case 23:  cfg.weighted_scheduler = true;         break;
+            case 24:  cfg.max_models_per_frame = atoi(optarg); break;
+            case 25:  cfg.test_adaptive_hand_person = true; break;
+            case 26:  cfg.test_hand_slot = atoi(optarg); break;
+            case 27:  cfg.test_person_slot = atoi(optarg); break;
+            case 28:  cfg.test_weight_high = atoi(optarg); break;
+            case 29:  cfg.test_weight_low = atoi(optarg); break;
+            case 30:  cfg.test_no_hand_frames_to_fallback = atoi(optarg); break;
             case 'v': cfg.verbose            = true;         break;
             case 'h': print_usage(argv[0]); exit(0);
             default:  print_usage(argv[0]); exit(1);
@@ -325,6 +435,7 @@ static sc::Config parse_args(int argc, char** argv) {
         slot.rknn.conf_threshold = model2_conf;
         slot.rknn.nms_threshold  = cfg.rknn.nms_threshold;  // inherit from primary
         slot.skip_frames         = model2_skip;
+        slot.run_weight          = model2_weight;
         cfg.extra_models.push_back(std::move(slot));
     }
     if (!model3_path.empty()) {
@@ -333,6 +444,7 @@ static sc::Config parse_args(int argc, char** argv) {
         slot.rknn.conf_threshold = model3_conf;
         slot.rknn.nms_threshold  = cfg.rknn.nms_threshold;
         slot.skip_frames         = model3_skip;
+        slot.run_weight          = model3_weight;
         cfg.extra_models.push_back(std::move(slot));
     }
 
@@ -340,6 +452,14 @@ static sc::Config parse_args(int argc, char** argv) {
     if (cfg.hand_fast_growth < 0.0f) cfg.hand_fast_growth = 0.0f;
     if (cfg.hand_fast_area_ratio < 0.0f) cfg.hand_fast_area_ratio = 0.0f;
     if (cfg.hand_fast_hold_frames < 1) cfg.hand_fast_hold_frames = 1;
+    if (cfg.test_adaptive_hand_person) cfg.weighted_scheduler = true;
+    if (cfg.primary_model_weight < 1) cfg.primary_model_weight = 1;
+    if (cfg.max_models_per_frame < 1) cfg.max_models_per_frame = 1;
+    if (cfg.test_hand_slot < 0) cfg.test_hand_slot = 0;
+    if (cfg.test_person_slot < 0) cfg.test_person_slot = 0;
+    if (cfg.test_weight_high < 1) cfg.test_weight_high = 1;
+    if (cfg.test_weight_low < 1) cfg.test_weight_low = 1;
+    if (cfg.test_no_hand_frames_to_fallback < 1) cfg.test_no_hand_frames_to_fallback = 1;
 
     return cfg;
 }
@@ -381,12 +501,45 @@ static bool g_enable_hand_tracker = false;
 
 static void on_detections(const std::vector<sc::Detection>& dets,
                            int frame_w, int frame_h) {
-    const std::vector<sc::Detection>* active = &dets;
     std::vector<sc::Detection> tracked;
-    if (g_enable_hand_tracker) {
+    const std::vector<sc::Detection>* active = &dets;
+
+    // Optional test policy:
+    // - when any hand appears -> prefer hand model weight and output hand target
+    // - when hand disappears for N frames -> prefer person model and output person target
+    if (g_adaptive_test_cfg.enabled) {
+        const std::vector<sc::Detection> hand_dets =
+            dets_for_slot(dets, g_adaptive_test_cfg.hand_slot);
+        const std::vector<sc::Detection> person_dets =
+            dets_for_slot(dets, g_adaptive_test_cfg.person_slot);
+        const bool hand_seen = !hand_dets.empty();
+        if (hand_seen) {
+            g_adaptive_no_hand_frames = 0;
+            if (g_adaptive_test_mode != AdaptiveTestMode::HandPreferred) {
+                g_adaptive_test_mode = AdaptiveTestMode::HandPreferred;
+                apply_adaptive_test_weights_if_needed(g_adaptive_test_mode);
+            }
+        } else {
+            g_adaptive_no_hand_frames++;
+            if (g_adaptive_no_hand_frames >= g_adaptive_test_cfg.no_hand_frames_to_fallback &&
+                g_adaptive_test_mode != AdaptiveTestMode::PersonPreferred) {
+                g_adaptive_test_mode = AdaptiveTestMode::PersonPreferred;
+                apply_adaptive_test_weights_if_needed(g_adaptive_test_mode);
+            }
+        }
+
+        // Output target follows current policy mode, not only current-frame hand_seen.
+        if (g_adaptive_test_mode == AdaptiveTestMode::HandPreferred) {
+            tracked = g_hand_policy_tracker.update(hand_dets);
+        } else {
+            tracked = g_person_policy_tracker.update(person_dets);
+        }
+        active = &tracked;
+    } else if (g_enable_hand_tracker) {
         tracked = g_hand_tracker.update(dets);
         active = &tracked;
     }
+
     const auto& out = *active;
 
     SC_LOG_DEBUG("Detections: raw=%zu tracked=%zu in %dx%d",
@@ -597,13 +750,14 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
         slot_cfg.rknn.conf_threshold = json_float(msg, "conf", cfg.rknn.conf_threshold);
         slot_cfg.rknn.nms_threshold  = json_float(msg, "nms", cfg.rknn.nms_threshold);
         slot_cfg.skip_frames         = json_int(msg, "skip", 0);
+        slot_cfg.run_weight          = json_int(msg, "weight", 1);
         slot_cfg.name                = json_str(msg, "name");
 
         int idx = sc::ai_capture_add_model(ai, slot_cfg);
         if (idx >= 0) {
             g_hand_tracker.reset();
-            SC_LOG_INFO("Control: added model slot %d (%s, skip=%d)",
-                        idx, path.c_str(), slot_cfg.skip_frames);
+            SC_LOG_INFO("Control: added model slot %d (%s, skip=%d, weight=%d)",
+                        idx, path.c_str(), slot_cfg.skip_frames, slot_cfg.run_weight);
         }
     } else if (cmd == "remove_model") {
         int slot = json_int(msg, "slot", -1);
@@ -638,11 +792,18 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
         SC_LOG_INFO("Control: %d model slot(s):", count);
         for (int i = 0; i < count; i++) {
             auto info = sc::ai_capture_get_model_info(ai, i);
-            SC_LOG_INFO("  slot %d: [%s] %s (conf=%.2f, skip=%d, %s)",
+            SC_LOG_INFO("  slot %d: [%s] %s (conf=%.2f, skip=%d, weight=%d, %s)",
                         i, info.name.c_str(), info.rknn.model_path.c_str(),
-                        info.rknn.conf_threshold, info.skip_frames,
+                        info.rknn.conf_threshold, info.skip_frames, info.run_weight,
                         info.enabled ? "enabled" : "disabled");
         }
+    } else if (cmd == "debug_models") {
+        if (!ai) {
+            SC_LOG_INFO("Control: debug_models -- AI pipeline not running");
+            return;
+        }
+        std::string report = sc::ai_capture_debug_status(ai);
+        SC_LOG_INFO("%s", report.c_str());
     } else if (cmd == "status") {
         int model_count = ai ? sc::ai_capture_model_count(ai) : 0;
         SC_LOG_INFO("Control: status -- SoulCam running, %d model slot(s), primary=%s",
@@ -662,6 +823,16 @@ int main(int argc, char** argv) {
     sc::Config cfg = parse_args(argc, argv);
     g_enable_hand_tracker = should_enable_hand_target_tracker(cfg);
     g_hand_tracker.set_config(make_hand_tracker_config(cfg), true);
+    g_adaptive_test_cfg.enabled = cfg.test_adaptive_hand_person;
+    g_adaptive_test_cfg.hand_slot = cfg.test_hand_slot;
+    g_adaptive_test_cfg.person_slot = cfg.test_person_slot;
+    g_adaptive_test_cfg.high_weight = cfg.test_weight_high;
+    g_adaptive_test_cfg.low_weight = cfg.test_weight_low;
+    g_adaptive_test_cfg.no_hand_frames_to_fallback = cfg.test_no_hand_frames_to_fallback;
+    g_adaptive_test_mode = AdaptiveTestMode::Neutral;
+    g_adaptive_no_hand_frames = 0;
+    g_hand_policy_tracker.reset();
+    g_person_policy_tracker.reset();
 
     if (cfg.verbose) {
         sc::log_set_level(sc::LogLevel::DEBUG);
@@ -676,6 +847,15 @@ int main(int argc, char** argv) {
                 cfg.hand_fast_growth,
                 cfg.hand_fast_area_ratio,
                 cfg.hand_fast_hold_frames);
+    SC_LOG_INFO("Model scheduler: %s (max_models_per_frame=%d, primary_weight=%d)",
+                cfg.weighted_scheduler ? "weighted" : "run-all",
+                cfg.max_models_per_frame,
+                cfg.primary_model_weight);
+    SC_LOG_INFO("Adaptive hand/person test policy: %s (hand_slot=%d, person_slot=%d, hi=%d, lo=%d, fallback=%d)",
+                cfg.test_adaptive_hand_person ? "enabled" : "disabled",
+                cfg.test_hand_slot, cfg.test_person_slot,
+                cfg.test_weight_high, cfg.test_weight_low,
+                cfg.test_no_hand_frames_to_fallback);
 
     // --- Set GStreamer plugin path BEFORE gst_init() ---
     // rgaconvert lives in a custom path; GStreamer scans plugins at init time.
@@ -727,6 +907,12 @@ int main(int argc, char** argv) {
         ai = sc::ai_capture_start(cfg, on_detections);
         if (!ai) {
             SC_LOG_WARN("AI pipeline failed to start -- RTSP continues without AI");
+            g_ai_for_policy = nullptr;
+        } else {
+            g_ai_for_policy = ai;
+            if (g_adaptive_test_cfg.enabled) {
+                apply_adaptive_test_weights_if_needed(AdaptiveTestMode::Neutral);
+            }
         }
     }
 
@@ -786,9 +972,9 @@ int main(int argc, char** argv) {
                     cfg.ai.src_fmt.c_str(), model_count);
         for (int i = 0; i < model_count; i++) {
             auto info = sc::ai_capture_get_model_info(ai, i);
-            SC_LOG_INFO("    slot %d: [%s] %s (conf=%.2f, skip=%d)",
+            SC_LOG_INFO("    slot %d: [%s] %s (conf=%.2f, skip=%d, weight=%d)",
                         i, info.name.c_str(), info.rknn.model_path.c_str(),
-                        info.rknn.conf_threshold, info.skip_frames);
+                        info.rknn.conf_threshold, info.skip_frames, info.run_weight);
         }
         if (cfg.enable_overlay) {
             SC_LOG_INFO("  Overlay: detection boxes drawn on RTSP stream");
@@ -827,6 +1013,7 @@ int main(int argc, char** argv) {
     sc::onvif_stream_stop(g_onvif);
     g_onvif = nullptr;
     sc::ai_capture_stop(ai);
+    g_ai_for_policy = nullptr;
     scene_hub_close();
     sc::rtsp_server_stop(rtsp);
 

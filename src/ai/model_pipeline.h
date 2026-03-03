@@ -23,25 +23,34 @@
 // ============================================================================
 
 #include "soulcam.h"
+#include <string>
 #include <vector>
 
 namespace sc {
 
 struct ModelPipeline;
 
+struct ModelPipelineOptions {
+    bool weighted_scheduler = false;
+    int max_models_per_frame = 1;
+    int primary_model_weight = 1;
+};
+
 // Create a multi-model pipeline.
 // The primary model (slot 0) is always created from primary_cfg.
 // Additional slots come from extra_models.
 // Returns nullptr only if the primary model fails to load.
 ModelPipeline* model_pipeline_create(const RknnConfig& primary_cfg,
-                                      const std::vector<ModelSlotConfig>& extra_models);
+                                      const std::vector<ModelSlotConfig>& extra_models,
+                                      const ModelPipelineOptions& options = {});
 
 // Destroy the pipeline and release all NPU resources.
 void model_pipeline_destroy(ModelPipeline* mp);
 
-// Run all active models on a frame (sequentially on NPU).
-// Detections from all models are appended to 'out', each tagged with model_id.
-// Models with skip_frames > 0 only run on their scheduled frames.
+// Run models on a frame according to scheduler policy:
+// - legacy run-all mode: all active models run sequentially (skip_frames applies)
+// - weighted mode: up to max_models_per_frame selected by weighted round-robin
+// Detections from executed models are appended to 'out', each tagged with model_id.
 // Returns 0 on success, -1 if pipeline is null.
 int model_pipeline_infer(ModelPipeline* mp,
                           const uint8_t* data, size_t size,
@@ -70,10 +79,16 @@ int model_pipeline_swap_model(ModelPipeline* mp, int slot_idx,
 // Enable or disable a model slot.
 void model_pipeline_enable_model(ModelPipeline* mp, int slot_idx, bool enable);
 
+// Update slot run weight (used by weighted scheduler). Returns 0 on success.
+int model_pipeline_set_slot_weight(ModelPipeline* mp, int slot_idx, int run_weight);
+
 // Get the number of model slots (including primary).
 int model_pipeline_count(const ModelPipeline* mp);
 
 // Get info about a model slot. Returns empty config if slot_idx is invalid.
 ModelSlotConfig model_pipeline_get_slot_info(const ModelPipeline* mp, int slot_idx);
+
+// Build a multiline debug report with model runtime/resource stats.
+std::string model_pipeline_debug_status(const ModelPipeline* mp);
 
 }  // namespace sc

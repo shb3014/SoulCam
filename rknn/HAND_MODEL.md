@@ -187,6 +187,105 @@ sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
 
 ---
 
+## 多模型切换模式（可扩展模型池）
+
+当前支持两种模型调度模式：
+
+- `run-all`（默认）：每帧运行所有启用模型（可配 `--modelN-skip`）。
+- `weighted`：按权重轮转，每帧最多运行 `N` 个模型（更利于资源可控和大模型池切换）。
+
+关键参数：
+
+- `--weighted-scheduler`：启用加权调度。
+- `--max-models-per-frame N`：每帧最多执行的模型数（推荐 `1`）。
+- `--model-weight W`：主模型权重。
+- `--model2-weight W` / `--model3-weight W`：附加模型权重。
+
+示例（A:B = 5:1）：
+
+```bash
+sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
+  "cd /home/ubuntu/SoulCam && sudo systemctl stop soulcam || true && \
+   sudo ./build/soulcam --ai \
+     --model /home/ubuntu/models/model_A.rknn \
+     --model-weight 5 \
+     --model2 /home/ubuntu/models/model_B.rknn \
+     --model2-weight 1 \
+     --weighted-scheduler \
+     --max-models-per-frame 1 \
+     --labels hand --conf 0.10 -v"
+```
+
+> 提示：若希望“每帧都跑主模型 + 次模型低频穿插”，可继续使用 `--model2-skip`。
+
+---
+
+## 测试策略：有手优先手，无手回退人
+
+> 这是测试策略开关，不是固定硬编码业务逻辑。默认关闭。
+
+目标行为：
+
+1. 场景中有手：优先跟踪手（并将调度权重倾向手模型）
+2. 场景中无手：回退跟踪人（并将调度权重倾向人模型）
+3. 在手优先模式下，会临时禁用 person 槽位，避免人模型周期运行造成跟踪跳变
+
+启动参数（推荐配合 weighted 调度）：
+
+- `--test-adaptive-hand-person`：启用测试策略（会自动启用 `--weighted-scheduler`）
+- `--test-hand-slot N`：手模型 slot（默认 `1`）
+- `--test-person-slot N`：人模型 slot（默认 `0`）
+- `--test-weight-high W`：优先侧高权重（默认 `10`）
+- `--test-weight-low W`：非优先侧低权重（默认 `1`）
+- `--test-no-hand-frames N`：连续无手 N 帧后切回人（默认 `8`）
+
+示例（slot0=person, slot1=hand）：
+
+```bash
+sshpass -p 'shb084ww' ssh -o StrictHostKeyChecking=no ubuntu@192.168.1.45 \
+  "cd /home/ubuntu/SoulCam && sudo systemctl stop soulcam || true && \
+   sudo ./build/soulcam --ai \
+     --model /home/ubuntu/models/yolov8n.rknn \
+     --model-weight 1 \
+     --model2 /home/ubuntu/models/hand_yolov8n_rk3566_i8_20260301.rknn \
+     --model2-weight 1 \
+     --conf 0.10 -v \
+     --test-adaptive-hand-person \
+     --test-hand-slot 1 \
+     --test-person-slot 0 \
+     --test-weight-high 10 \
+     --test-weight-low 1 \
+     --test-no-hand-frames 8 \
+     --max-models-per-frame 1"
+```
+
+> 注意：该双模型测试建议不要传 `--labels hand`，因为这是主模型（slot0）标签参数，会影响标签显示与策略判断。
+
+---
+
+## 调试命令（模型与资源状态）
+
+控制口新增命令：
+
+```bash
+echo '{"cmd":"debug_models"}' | socat - UNIX-SENDTO:/tmp/soulcam_ctrl.sock
+```
+
+输出内容包含：
+
+- 当前调度模式、每帧最大模型数
+- 槽位总数 / 启用数 / 已加载数
+- 进程 RSS 与模型估算开销
+- 每个 slot 的：
+  - `enabled/loaded`
+  - `skip/weight`
+  - 模型文件大小
+  - 估算加载开销（RSS delta）
+  - 调度次数、跳过次数、运行占比
+  - 推理耗时统计（avg/last/max）
+
+---
+
 ## 快速验收命令
 
 ```bash
