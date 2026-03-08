@@ -14,9 +14,20 @@ The phase-1 implementation allows dynamic DP keys and does not hardcode a closed
 
 ## Command behavior
 
-- `setDp` (`cmd=1`): accepts `data` list of `{ "dp": <int>, "value": <any> }` and updates in-memory state.
-- `getDp` (`cmd=2`): accepts list of DP IDs (or `{dp:<id>}` objects) and returns matching values.
-- `getDpAll` (`cmd=3`): returns all in-memory DP values.
+- `setDp` (`cmd=0`): accepts `data` list of `{ "dp": <int>, "value": <any> }` and updates in-memory state.
+- `getDp` (`cmd=1`): accepts list of DP IDs (or `{ "dp": <id> }` objects) and returns matching values.
+- `getDpAll` (`cmd=2`): returns all in-memory DP values.
+
+DP uplink reports are published on `out/<clientId>` using:
+
+```json
+{
+  "cmd": 1,
+  "data": [
+    { "dp": 1001, "value": 1 }
+  ]
+}
+```
 
 ## Pending host-team confirmation
 

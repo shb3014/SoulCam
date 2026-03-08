@@ -147,7 +147,7 @@ python3 -c "import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s
 # Identity / discovery
 --soullink-service-id <id>
 --soullink-mdns <service-type>             # default: _soulcamDebug._tcp.local
---soullink-mdns-refresh <sec>              # default: 5 (periodic re-announce)
+--soullink-mdns-refresh <sec>              # default: 5 (refresh while disconnected)
 --soullink-api-port <port>                 # default: 5212
 
 # MQTT broker / topics
@@ -187,7 +187,7 @@ The native module exposes:
 - `GET /debug` on `--soullink-api-port` (default `5212`)
 - optional override: `GET /debug?ip=<host-ip>`
 
-Use it to retarget device MQTT broker at runtime (auto uses requester source IP):
+Use it to retarget/resume MQTT broker connection (auto uses requester source IP):
 
 ```bash
 curl "http://192.168.1.45:5212/debug"
@@ -225,7 +225,7 @@ Command payload shape:
 2   getDpAll
 4   subStream
 5   unsubStream
-12  disconnectServer         (currently reports warning/not implemented)
+12  disconnectServer         (implemented: suspend MQTT until next /debug handshake)
 13  syncFiles
 14  soulReload               (currently reports warning/not implemented)
 18  streaming
@@ -271,6 +271,11 @@ mosquitto_pub -h 192.168.1.100 \
 mosquitto_pub -h 192.168.1.100 \
   -t 'soulcam/debug/in/ubuntu-6f470995' \
   -m '{"cmd":13,"data":{"api":"http://192.168.1.100:3000"}}'
+
+# disconnectServer (device should drop MQTT promptly)
+mosquitto_pub -h 192.168.1.100 \
+  -t 'soulcam/debug/in/ubuntu-6f470995' \
+  -m '{"cmd":12,"data":""}'
 ```
 
 ---
@@ -278,8 +283,8 @@ mosquitto_pub -h 192.168.1.100 \
 ## 10) Soullink Health / Discovery Checks
 
 ```bash
-# mDNS advertise process
-pgrep -a avahi-publish-service
+# mDNS advertise process (runs while MQTT disconnected, stops when connected)
+pgrep -fa avahi-publish-service
 
 # API endpoint alive
 curl -v "http://192.168.1.45:5212/debug"

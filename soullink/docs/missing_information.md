@@ -22,5 +22,6 @@ This file tracks unresolved host-integration requirements before production roll
 - mDNS type: `_soulcamDebug._tcp.local`
 - MQTT prefix: `soulcam/debug/`
 - RTSP endpoint: `rtsp://<device_ip>:8554/cam`
-- Composite client ID enabled by default when profile allows it.
+- Compatibility client ID is default (`<serviceIdentifier>`); composite remains optional.
+- Discovery exposure remains continuous over mDNS to satisfy current SoulFlow service timeout/cleanup behavior.
 

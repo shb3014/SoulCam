@@ -4,7 +4,7 @@
 
 - Default endpoint: `rtsp://<device_ip>:8554/cam`
 - Producer: existing `soulcam` runtime (`src/main.cpp` path)
-- Consumer-facing publication: Soullink message channel (`m/<clientId>`) health payloads from in-process C++ module
+- Consumer-facing health publication: Soullink DP uplink on `out/<clientId>`
 
 ## Runtime readiness rule
 
@@ -12,25 +12,24 @@ RTSP is mandatory for `deviceType=soulcam`.
 
 The native Soullink module reports:
 
-- `rtspOnline=true` only when TCP connectivity to the RTSP port succeeds.
-- `ready=true` only when:
+- `dp=1001` (`rtspOnline`) is `1` when TCP connectivity to RTSP port succeeds.
+- `dp=1002` (`streamSubscribed`) is `1` when stream subscription is active.
+- `dp=1003` (`moduleReady`) is `1` only when:
   - RTSP is online, and
   - TCP frame receiver is started.
 
 This prevents the client from advertising fully ready while RTSP is down.
 
-## Health payload example
+## Health payload example (`out/<clientId>`)
 
 ```json
 {
-  "id": 0,
-  "type": "health",
-  "deviceType": "soulcam",
-  "serviceIdentifier": "soulcam-a1b2c3d4e5",
-  "rtspUri": "rtsp://192.168.1.45:8554/cam",
-  "rtspOnline": true,
-  "ready": true,
-  "uptimeSec": 24
+  "cmd": 1,
+  "data": [
+    { "dp": 1001, "value": 1 },
+    { "dp": 1002, "value": 0 },
+    { "dp": 1003, "value": 1 }
+  ]
 }
 ```
 

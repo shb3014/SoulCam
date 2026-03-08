@@ -30,7 +30,6 @@ private:
     bool start_mdns();
     void stop_mdns();
     void maintain_mdns();
-    bool should_expose_discovery() const;
 
     bool start_mqtt();
     void stop_mqtt();

@@ -1,56 +1,72 @@
 # SoulCam Soullink Protocol Mapping
 
+## Runtime transport and discovery
+
+- Soullink runs in-process in `soulcam` (`src/soullink/module.cpp`).
+- MQTT transport uses one persistent `libmosquitto` client session.
+- mDNS advertisement uses `avahi-publish-service`.
+- Discovery lifecycle (aligned with Ivy reference):
+  - mDNS advertises while MQTT is not connected (discovery phase)
+  - mDNS stops when MQTT connects (Ivy-compatible behavior)
+  - mDNS restarts on disconnect, suspend (`disconnectServer`), or process crash (watchdog)
+- HTTP handshake endpoint:
+  - `GET /debug` (uses requester source IP as broker host)
+  - optional override: `GET /debug?ip=<host-ip>`
+
 ## MQTT topics
 
 - Prefix: `soulcam/debug/`
-- Downlink command topic: `soulcam/debug/in/<clientId>`
-- Uplink DP/status topic: `soulcam/debug/out/<clientId>`
-- Uplink message topic: `soulcam/debug/m/<clientId>`
-- Uplink stream topic: `soulcam/debug/s/<clientId>/<streamIndex>`
+- Downlink subscribe topics:
+  - `soulcam/debug/in/<serviceIdentifier>` (primary)
+  - `soulcam/debug/in/<clientId>` (compat, when different)
+- Uplink topics:
+  - DP/status: `soulcam/debug/out/<clientId>`
+  - Messages/notifications/sync: `soulcam/debug/m/<clientId>`
+  - Stream state: `soulcam/debug/s/<clientId>/<streamIndex>`
 
-## Runtime implementation notes
-
-- Soullink now runs in-process inside `soulcam` (`src/soullink/module.cpp`).
-- MQTT transport uses `mosquitto_sub`/`mosquitto_pub` binaries at runtime.
-- mDNS advertisement uses `avahi-publish-service`.
+Default client ID mode is compatibility (`<serviceIdentifier>`). Composite mode (`soulcam:<serviceIdentifier>`) is optional via CLI.
 
 ## SoulCmd mapping (current implementation)
 
 | Command | Numeric cmd | Behavior |
 |---|---:|---|
-| `setDp` | 1 | Stores DP values and publishes DP ack on `out`. |
-| `getDp` | 2 | Reads requested DP values and publishes on `out`. |
-| `getDpAll` | 3 | Publishes full DP map on `out`. |
-| `subStream` | 4 | Marks stream subscription active and publishes ack on `out`. |
-| `unsubStream` | 5 | Marks stream subscription inactive and publishes ack on `out`. |
-| `streaming` | 6 | Publishes current stream subscription state on `out`. |
-| `syncFiles` | 13 | Runs sync worker and publishes progress/completion on `m` with `id=1`. |
+| `setDp` | 0 | Stores DP values and publishes DP report (`cmd=1`) on `out`. |
+| `getDp` | 1 | Reads requested DPs and publishes report (`cmd=1`) on `out`. |
+| `getDpAll` | 2 | Publishes all in-memory DPs (`cmd=1`) on `out`. |
+| `subStream` | 4 | Sets subscribed=true and publishes stream-state binary on `s/<clientId>/<index>`. |
+| `unsubStream` | 5 | Sets subscribed=false and publishes stream-state binary on `s/<clientId>/<index>`. |
+| `disconnectServer` | 12 | Suspends MQTT until next `/debug` handshake reconnects. |
+| `syncFiles` | 13 | Runs sync worker and publishes progress/result on `m` with `id=1`. |
+| `streaming` | 18 | Publishes current stream-state binary on `s/<clientId>/<index>`. |
 
-Guarded commands (`reboot`, `soulReload`, `disconnectServer`, `sysCmd`) currently return `id=0` blocked messages unless explicitly enabled in code.
+Currently not implemented and reported as warnings:
+- `soulReload` (`14`)
+- `directorPlay` (`20`)
+- `sysCmd` (`21`)
 
-Unknown or unsupported commands return an explicit structured message on `m`:
+Unknown/unsupported commands are reported on `m` as:
 
 ```json
 {
   "id": 0,
-  "type": "unsupported",
-  "cmd": "<original-cmd>",
-  "details": "SoulCmd is unsupported for soulcam phase-1."
+  "message": {
+    "text": "Unsupported command",
+    "type": "warning",
+    "data": { "cmd": "<original-cmd>" }
+  }
 }
 ```
 
-## Stream payload format
+## Stream and TCP frame payloads
 
-Current stream-status uplink payload on `s/<clientId>/<streamIndex>`:
-
+Stream-state uplink payload on `s/<clientId>/<streamIndex>`:
 - Little-endian binary record:
   - `uint16 uid`
   - `uint8 oldStatus`
   - `uint8 newStatus`
   - `uint32 timestamp`
 
-The receiver listens on TCP `streamTcp` (`1234` by profile default) and expects repeated frame packets:
-
+TCP JPEG receiver (`streamTcp`, default `1234`) input format:
 - `4-byte little-endian JPEG size`
 - `JPEG payload bytes`
 

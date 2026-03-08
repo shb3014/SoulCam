@@ -105,7 +105,6 @@ bool Module::start() {
     start_mqtt();
     start_frame_receiver();
 
-    SC_LOG_INFO("Soullink mDNS refresh interval: %d sec", sl_cfg_.mdns_refresh_sec);
     SC_LOG_INFO("Soullink module started: serviceId=%s clientId=%s",
                 service_identifier_.c_str(),
                 client_id_.c_str());
@@ -125,19 +124,19 @@ void Module::stop() {
 void Module::poll() {
     if (!running_) return;
 
-    // Process disconnect requests outside libmosquitto callback thread.
-    // Calling loop_stop from inside mqtt callback can stall/disconnect slowly.
     if (mqtt_suspend_requested_.exchange(false)) {
         stop_mqtt();
         SC_LOG_INFO("Soullink MQTT suspended by disconnectServer");
     }
 
-    if (should_expose_discovery()) {
+    // Ivy-aligned mDNS lifecycle: advertise only while MQTT is not connected.
+    // SoulFlow cleanup now only clears `found` (not `connected`), so stopping
+    // mDNS while connected is safe.
+    if (!mqtt_online_ || mqtt_suspended_) {
         maintain_mdns();
     } else if (mdns_pid_ > 0) {
-        // Align with Ivy core behavior: mDNS advertise only while disconnected.
+        SC_LOG_INFO("Soullink mDNS stopped (MQTT connected)");
         stop_mdns();
-        SC_LOG_INFO("Soullink mDNS disabled while MQTT connected");
     }
 
     auto now = std::chrono::steady_clock::now();
@@ -187,7 +186,6 @@ bool Module::start_mdns() {
         mdns_pid_ = -1;
         return false;
     }
-    last_mdns_refresh_ = std::chrono::steady_clock::now();
     SC_LOG_INFO("Soullink mDNS advertised as %s.%s",
                 service_identifier_.c_str(),
                 normalize_mdns_type(sl_cfg_.mdns_service_type).c_str());
@@ -202,7 +200,6 @@ void Module::stop_mdns() {
 }
 
 void Module::maintain_mdns() {
-    // Host discovery side expects frequent SRV/TXT visibility; keep mDNS announcer fresh.
     bool need_restart = false;
 
     if (mdns_pid_ > 0) {
@@ -217,12 +214,14 @@ void Module::maintain_mdns() {
         need_restart = true;
     }
 
-    auto now = std::chrono::steady_clock::now();
-    if (!need_restart) {
-        const auto elapsed_sec =
-            std::chrono::duration_cast<std::chrono::seconds>(now - last_mdns_refresh_).count();
-        if (elapsed_sec >= sl_cfg_.mdns_refresh_sec) {
-            SC_LOG_DEBUG("Soullink mDNS refresh tick (%lld sec)", static_cast<long long>(elapsed_sec));
+    // Periodic re-announcement: avahi-publish-service only sends a gratuitous
+    // announcement at launch.  Ivy calls mdns_announce(true) every 5 s to stay
+    // visible; we achieve the same by cycling the publisher process.
+    if (!need_restart && mdns_pid_ > 0) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            now - last_mdns_refresh_).count();
+        if (elapsed >= sl_cfg_.mdns_refresh_sec) {
             need_restart = true;
         }
     }
@@ -230,12 +229,8 @@ void Module::maintain_mdns() {
     if (need_restart) {
         stop_mdns();
         start_mdns();
+        last_mdns_refresh_ = std::chrono::steady_clock::now();
     }
-}
-
-bool Module::should_expose_discovery() const {
-    // Ivy reference keeps debug service/mDNS active while disconnected and disables after connect.
-    return mqtt_suspended_ || !mqtt_online_;
 }
 
 bool Module::start_mqtt() {

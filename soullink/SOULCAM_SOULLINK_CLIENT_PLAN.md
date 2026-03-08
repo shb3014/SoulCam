@@ -32,10 +32,13 @@ Implemented in repository:
   - MQTT transport switched to single persistent `libmosquitto` client session
   - downlink subscription covers host command topic shape (`in/<serviceIdentifier>`)
 - [x] Re-examined against Ivy Soullink reference (`SoulLinkService`/`SoulLinkClient`) and aligned runtime behavior:
-  - added HTTP debug handshake endpoint `GET /debug?ip=<host-ip>` in native module (listens on profile `api_port`, default `5212`) to dynamically retarget MQTT broker
+  - added HTTP debug handshake endpoint `GET /debug` (optional `?ip=<host-ip>`) in native module (listens on profile `api_port`, default `5212`) to dynamically retarget MQTT broker
   - switched default MQTT `clientId` mode to Ivy-compatible `<serviceIdentifier>` (composite mode remains configurable via CLI)
   - stream command handlers now honor requested stream index payloads (`subStream`/`unsubStream`/`streaming`)
-- [x] Updated SoulFlow renderer `connectDev()` to use discovered service port first (fallback to legacy port 80), matching profile-driven `api_port`.
+- [x] Additional runtime alignments:
+  - `disconnectServer` (`cmd=12`) implemented to suspend MQTT immediately and keep disconnected until next handshake
+  - mDNS lifecycle aligned with Ivy reference: advertise while MQTT disconnected, stop when MQTT connects, restart on disconnect/suspend
+  - Fixed SoulFlow `cleanupServices` regression (commit `8ded8b7`) that forced `connected: false` on mDNS timeout — original behavior only clears `found`
 
 Pending external validation:
 
@@ -192,7 +195,7 @@ Implement first:
 
 Controlled/guarded:
 
-- `reboot`, `soulReload`, `disconnectServer`, `sysCmd`
+- `reboot`, `soulReload`, `sysCmd`
 
 Unsupported in phase-1 must return explicit structured message (`id=0`):
 
@@ -356,7 +359,10 @@ The following inputs are currently missing or not confirmed for `deviceType=soul
 
 ## 13) Immediate Next Actions
 
-1. Run live SoulFlow connect flow (`connectDev`) and verify `/debug?ip=<host-ip>` retargets broker without manual flags.
+1. Run live SoulFlow connect/disconnect flow and verify:
+   - connect uses `/debug` handshake to retarget broker
+   - `disconnectServer` suspends MQTT promptly
+   - reconnect resumes on next handshake.
 2. Run subnet validation gates (mDNS visibility, command roundtrip, RTSP readiness).
 3. Complete host-team confirmations in Section 12 (allowlist, contracts, security policy).
 4. Add soak/watchdog hardening once runtime telemetry is captured on device.
