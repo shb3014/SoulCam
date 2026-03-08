@@ -101,6 +101,46 @@ struct ModelSlotConfig {
 };
 
 // ---------------------------------------------------------------------------
+// Soullink integration configuration (native C++ module)
+// ---------------------------------------------------------------------------
+struct SoullinkConfig {
+    bool        enable = true;
+
+    // Identity and topic policy
+    std::string device_type = "soulcam";
+    std::string mdns_service_type = "_soulcamDebug._tcp.local";
+    std::string mqtt_topic_prefix = "soulcam/debug/";
+    bool        use_composite_client_id = false;  // default Ivy-compatible clientId=<serviceIdentifier>
+    std::string service_identifier;               // optional override
+
+    // Broker / transport
+    std::string mqtt_host = "127.0.0.1";
+    int         mqtt_port = 1883;
+    std::string mqtt_username;
+    std::string mqtt_password;
+
+    // Ports and channel metadata
+    int         api_port = 5212;
+    int         stream_tcp_port = 1234;
+    int         stream_index = 0;
+    int         mdns_refresh_sec = 5;   // periodic re-announce/restart to keep host discovery alive
+
+    // RTSP contract publication
+    std::string rtsp_host_override;   // empty => auto-detect
+    int         status_interval_sec = 5;
+
+    // syncFiles worker
+    std::string sync_root = "/home/ubuntu/SoulCam";
+    std::string sync_state_path = "/var/lib/soulcam/soullink_commit_id";
+    int         sync_timeout_sec = 10;
+    int         sync_retries = 3;
+
+    // TCP JPEG sink
+    int         max_frame_bytes = 2 * 1024 * 1024;
+    std::string frame_sink_path = "/tmp/soulcam_latest.jpg";
+};
+
+// ---------------------------------------------------------------------------
 // Top-level application config
 // ---------------------------------------------------------------------------
 struct Config {
@@ -154,6 +194,9 @@ struct Config {
     float        hand_fast_growth = 0.18f;
     float        hand_fast_area_ratio = 0.90f;
     int          hand_fast_hold_frames = 3;
+
+    // Soullink module (native in-process integration).
+    SoullinkConfig soullink;
 };
 
 // ---------------------------------------------------------------------------

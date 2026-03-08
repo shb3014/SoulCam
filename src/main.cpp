@@ -54,6 +54,7 @@
 #include "pipeline/onvif_device.h"     // ONVIF device service (WS-Discovery + SOAP)
 #include "pipeline/snapshot.h"         // JPEG snapshot endpoint
 #include "pipeline/tuya_ipc.h"         // Tuya IPC SDK adapter
+#include "soullink/module.h"           // Native Soullink transport module
 #include "util/logger.h"
 
 #include <gst/gst.h>
@@ -66,6 +67,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <sstream>
 #include <string_view>
 #include <iomanip>
@@ -277,6 +279,25 @@ static void print_usage(const char* prog) {
         "Runtime control:\n"
         "  --ctrl-sock PATH   Control socket      (default: /tmp/soulcam_ctrl.sock)\n"
         "\n"
+        "Soullink (native module):\n"
+        "  --soullink               Enable Soullink transport module (default: enabled)\n"
+        "  --no-soullink            Disable Soullink module\n"
+        "  --soullink-service-id ID Override service identifier\n"
+        "  --soullink-mdns TYPE     mDNS service type (default: _soulcamDebug._tcp.local)\n"
+        "  --soullink-mqtt-host H   MQTT broker host (default: 127.0.0.1)\n"
+        "  --soullink-mqtt-port P   MQTT broker port (default: 1883)\n"
+        "  --soullink-mqtt-prefix T MQTT topic prefix (default: soulcam/debug/)\n"
+        "  --soullink-mqtt-user U   MQTT username\n"
+        "  --soullink-mqtt-pass P   MQTT password\n"
+        "  --soullink-api-port P    API/mDNS advertised port (default: 5212)\n"
+        "  --soullink-stream-port P TCP JPEG stream ingress port (default: 1234)\n"
+        "  --soullink-stream-index I streamIndex for uplink topic (default: 0)\n"
+        "  --soullink-mdns-refresh N periodic mDNS refresh seconds (default: 5)\n"
+        "  --soullink-sync-root PATH syncFiles managed root\n"
+        "  --soullink-sync-state PATH persisted commitID state file\n"
+        "  --soullink-compat-id     Use compatibility clientId (<serviceIdentifier>, default)\n"
+        "  --soullink-composite-id  Use composite clientId (<deviceType>:<serviceIdentifier>)\n"
+        "\n"
         "General:\n"
         "  -v, --verbose      Verbose logging\n"
         "  -h, --help         Show this help\n"
@@ -343,6 +364,24 @@ static sc::Config parse_args(int argc, char** argv) {
         {"media",         required_argument, nullptr, 3},
         {"scene-sock",    required_argument, nullptr, 4},
         {"ctrl-sock",     required_argument, nullptr, 5},
+        // Soullink module options
+        {"soullink",      no_argument,       nullptr, 40},
+        {"no-soullink",   no_argument,       nullptr, 41},
+        {"soullink-service-id", required_argument, nullptr, 42},
+        {"soullink-mdns", required_argument, nullptr, 43},
+        {"soullink-mqtt-host", required_argument, nullptr, 44},
+        {"soullink-mqtt-port", required_argument, nullptr, 45},
+        {"soullink-mqtt-prefix", required_argument, nullptr, 46},
+        {"soullink-mqtt-user", required_argument, nullptr, 47},
+        {"soullink-mqtt-pass", required_argument, nullptr, 48},
+        {"soullink-api-port", required_argument, nullptr, 49},
+        {"soullink-stream-port", required_argument, nullptr, 50},
+        {"soullink-stream-index", required_argument, nullptr, 51},
+        {"soullink-mdns-refresh", required_argument, nullptr, 56},
+        {"soullink-sync-root", required_argument, nullptr, 52},
+        {"soullink-sync-state", required_argument, nullptr, 53},
+        {"soullink-compat-id", no_argument, nullptr, 54},
+        {"soullink-composite-id", no_argument, nullptr, 55},
         // Multi-model options
         {"model2",        required_argument, nullptr, 10},
         {"model2-skip",   required_argument, nullptr, 11},
@@ -402,6 +441,24 @@ static sc::Config parse_args(int argc, char** argv) {
             case 3:   cfg.isp.media_dev      = optarg;       break;
             case 4:   cfg.scene_sock         = optarg;       break;
             case 5:   cfg.ctrl_sock          = optarg;       break;
+            // Soullink module
+            case 40:  cfg.soullink.enable = true;            break;
+            case 41:  cfg.soullink.enable = false;           break;
+            case 42:  cfg.soullink.service_identifier = optarg; break;
+            case 43:  cfg.soullink.mdns_service_type = optarg; break;
+            case 44:  cfg.soullink.mqtt_host = optarg;       break;
+            case 45:  cfg.soullink.mqtt_port = atoi(optarg); break;
+            case 46:  cfg.soullink.mqtt_topic_prefix = optarg; break;
+            case 47:  cfg.soullink.mqtt_username = optarg;   break;
+            case 48:  cfg.soullink.mqtt_password = optarg;   break;
+            case 49:  cfg.soullink.api_port = atoi(optarg);  break;
+            case 50:  cfg.soullink.stream_tcp_port = atoi(optarg); break;
+            case 51:  cfg.soullink.stream_index = atoi(optarg); break;
+            case 56:  cfg.soullink.mdns_refresh_sec = atoi(optarg); break;
+            case 52:  cfg.soullink.sync_root = optarg;       break;
+            case 53:  cfg.soullink.sync_state_path = optarg; break;
+            case 54:  cfg.soullink.use_composite_client_id = false; break;
+            case 55:  cfg.soullink.use_composite_client_id = true;  break;
             // Multi-model
             case 10:  model2_path = optarg;                  break;
             case 11:  model2_skip = atoi(optarg);            break;
@@ -460,6 +517,14 @@ static sc::Config parse_args(int argc, char** argv) {
     if (cfg.test_weight_high < 1) cfg.test_weight_high = 1;
     if (cfg.test_weight_low < 1) cfg.test_weight_low = 1;
     if (cfg.test_no_hand_frames_to_fallback < 1) cfg.test_no_hand_frames_to_fallback = 1;
+    if (cfg.soullink.mqtt_port < 1 || cfg.soullink.mqtt_port > 65535) cfg.soullink.mqtt_port = 1883;
+    if (cfg.soullink.api_port < 1 || cfg.soullink.api_port > 65535) cfg.soullink.api_port = 5212;
+    if (cfg.soullink.stream_tcp_port < 1 || cfg.soullink.stream_tcp_port > 65535) {
+        cfg.soullink.stream_tcp_port = 1234;
+    }
+    if (cfg.soullink.stream_index < 0) cfg.soullink.stream_index = 0;
+    if (cfg.soullink.mdns_refresh_sec < 1) cfg.soullink.mdns_refresh_sec = 5;
+    if (cfg.soullink.mqtt_topic_prefix.empty()) cfg.soullink.mqtt_topic_prefix = "soulcam/debug/";
 
     return cfg;
 }
@@ -952,6 +1017,13 @@ int main(int argc, char** argv) {
     // --- Control socket ---
     ctrl_init(cfg.ctrl_sock);
 
+    // --- Soullink module (in-process) ---
+    std::unique_ptr<sc::soullink::Module> soullink;
+    if (cfg.soullink.enable) {
+        soullink = std::make_unique<sc::soullink::Module>(cfg);
+        soullink->start();
+    }
+
     // --- Print summary ---
     fprintf(stderr, "\n");
     SC_LOG_INFO("=== SoulCam running ===");
@@ -996,17 +1068,20 @@ int main(int argc, char** argv) {
     if (g_ctrl_fd >= 0) {
         SC_LOG_INFO("  Control: %s (model hot-swap, status)", cfg.ctrl_sock.c_str());
     }
+    SC_LOG_INFO("  Soullink: %s", soullink ? "enabled (native C++ module)" : "disabled");
     SC_LOG_INFO("  Press Ctrl+C to stop");
     fprintf(stderr, "\n");
 
     // --- Main loop: poll control socket ---
     while (!g_shutdown) {
         ctrl_poll(ai, cfg);
+        if (soullink) soullink->poll();
         usleep(100000);  // 100ms polling interval
     }
 
     // --- Cleanup ---
     SC_LOG_INFO("Shutting down...");
+    if (soullink) soullink->stop();
     ctrl_close();
     sc::snapshot_server_stop(snap_srv);
     sc::onvif_device_stop(onvif_dev);

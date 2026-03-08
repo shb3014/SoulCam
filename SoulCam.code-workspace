@@ -2,6 +2,12 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../../../../mnt/d/WebProjects/SoulFlow"
+		},
+		{
+			"path": "../Tuya-Plantsio-Ivy2.0"
 		}
 	],
 	"settings": {}

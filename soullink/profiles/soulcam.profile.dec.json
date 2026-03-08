@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0",
+  "name": "SoulCam Device Profile",
+  "description": "SoulCam Soullink client profile.",
+  "profile": {
+    "deviceType": "soulcam",
+    "mdnsServiceTypes": [
+      "_soulcamDebug._tcp.local"
+    ],
+    "mqttTopicPrefix": "soulcam/debug/",
+    "defaultPorts": {
+      "mqtt": 1883,
+      "api": 5212,
+      "streamTcp": 1234,
+      "streamIndex": 0
+    },
+    "capabilities": {
+      "dp": true,
+      "message": true,
+      "stream": true,
+      "sync": true,
+      "monitor": true,
+      "videoStream": true,
+      "directorMode": false
+    },
+    "channelPolicy": {
+      "useCompositeDeviceKey": true
+    }
+  }
+}

@@ -31,6 +31,7 @@ pkg_check_modules(GST       REQUIRED gstreamer-1.0)
 pkg_check_modules(GST_APP   REQUIRED gstreamer-app-1.0)
 pkg_check_modules(GST_VIDEO REQUIRED gstreamer-video-1.0)
 pkg_check_modules(GST_RTSP  REQUIRED gstreamer-rtsp-server-1.0)
+pkg_check_modules(MOSQUITTO REQUIRED libmosquitto)
 
 # RKNN runtime  (ships as a prebuilt .so; no pkg-config)
 # Search order: -DRKNN_DIR, ../rknn, source-dir itself, /usr/local
@@ -81,6 +82,9 @@ endif()
 # ---------------------------------------------------------------------------
 set(SOULCAM_SOURCES
     main.cpp
+    soullink/json.cpp
+    soullink/sync_engine.cpp
+    soullink/module.cpp
     pipeline/isp_config.cpp
     pipeline/rtsp_server.cpp
     pipeline/ai_capture.cpp
@@ -103,6 +107,7 @@ target_include_directories(soulcam PRIVATE
     ${GST_APP_INCLUDE_DIRS}
     ${GST_VIDEO_INCLUDE_DIRS}
     ${GST_RTSP_INCLUDE_DIRS}
+    ${MOSQUITTO_INCLUDE_DIRS}
 )
 
 target_link_libraries(soulcam PRIVATE
@@ -110,6 +115,7 @@ target_link_libraries(soulcam PRIVATE
     ${GST_APP_LIBRARIES}
     ${GST_VIDEO_LIBRARIES}
     ${GST_RTSP_LIBRARIES}
+    ${MOSQUITTO_LIBRARIES}
     pthread
     dl
 )
