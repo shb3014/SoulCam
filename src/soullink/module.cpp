@@ -400,36 +400,71 @@ void Module::dispatch_command(const JsonValue& msg) {
         case kCmdUnsubStream: handle_unsub_stream(data ? *data : JsonValue(0.0)); break;
         case kCmdStreaming: handle_streaming(data ? *data : JsonValue(0.0)); break;
         case kCmdSyncFiles: handle_sync_files(data ? *data : JsonValue(JsonValue::Object{})); break;
+        case kCmdSysCmd: handle_sys_cmd(data ? *data : JsonValue(0.0)); break;
         case kCmdSoulReload:
         case kCmdDirectorPlay:
-        case kCmdSysCmd:
             publish_notification("Command received but not implemented", "warning");
             break;
         default: publish_unsupported(*cmd_v); break;
     }
 }
 
+static JsonValue state_to_json(const sc::StateType& v) {
+    return std::visit([](auto&& arg) -> JsonValue {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, bool>)
+            return JsonValue(arg);
+        else if constexpr (std::is_same_v<T, uint32_t>)
+            return JsonValue(static_cast<double>(arg));
+        else if constexpr (std::is_same_v<T, int>)
+            return JsonValue(static_cast<double>(arg));
+        else if constexpr (std::is_same_v<T, float>)
+            return JsonValue(static_cast<double>(arg));
+        else if constexpr (std::is_same_v<T, std::string>)
+            return JsonValue(arg);
+        else
+            return JsonValue(0.0);
+    }, v);
+}
+
+static bool store_set_from_json_value(int dp_id, const JsonValue& value) {
+    auto& store = sc::Store::instance();
+    if (value.is_bool())
+        return store.setFromJson(dp_id, value.as_bool());
+    if (value.is_number())
+        return store.setFromJson(dp_id, value.as_number());
+    if (value.is_string())
+        return store.setFromJson(dp_id, value.as_string());
+    return false;
+}
+
 void Module::handle_set_dp(const JsonValue& data) {
     JsonValue::Array updates;
+    bool persist_dirty = false;
+
     if (data.is_array()) {
-        std::lock_guard<std::mutex> lk(dp_mu_);
         for (const auto& item : data.as_array()) {
             if (!item.is_object()) continue;
             const auto* dp = item.get("dp");
             const auto* value = item.get("value");
             if (!dp || !dp->is_number() || !value) continue;
             int dp_id = dp->as_int();
-            dp_values_[dp_id] = *value;
 
-            JsonValue::Object row;
-            row["dp"] = JsonValue(static_cast<int64_t>(dp_id));
-            row["value"] = *value;
-            updates.emplace_back(JsonValue(std::move(row)));
+            if (store_set_from_json_value(dp_id, *value)) {
+                if (sc::SoulCamDp::isPersist(dp_id)) persist_dirty = true;
+                auto stored = sc::Store::instance().getRaw(dp_id);
+                JsonValue::Object row;
+                row["dp"] = JsonValue(static_cast<int64_t>(dp_id));
+                row["value"] = state_to_json(stored);
+                updates.emplace_back(JsonValue(std::move(row)));
+            }
         }
     }
 
+    if (persist_dirty) sc::Store::instance().save();
+
     JsonValue::Object out;
-    out["cmd"] = JsonValue(static_cast<int64_t>(kCmdGetDp));  // SoulFlow parser expects cmd=1
+    out["cmd"] = JsonValue(static_cast<int64_t>(kCmdGetDp));
     out["data"] = JsonValue(std::move(updates));
     publish_json(topic_out_, JsonValue(std::move(out)));
 }
@@ -437,7 +472,6 @@ void Module::handle_set_dp(const JsonValue& data) {
 void Module::handle_get_dp(const JsonValue& data) {
     JsonValue::Array rows;
     if (data.is_array()) {
-        std::lock_guard<std::mutex> lk(dp_mu_);
         for (const auto& item : data.as_array()) {
             int dp_id = -1;
             if (item.is_number()) dp_id = item.as_int(-1);
@@ -447,8 +481,7 @@ void Module::handle_get_dp(const JsonValue& data) {
             if (dp_id < 0) continue;
             JsonValue::Object row;
             row["dp"] = JsonValue(static_cast<int64_t>(dp_id));
-            auto it = dp_values_.find(dp_id);
-            row["value"] = (it != dp_values_.end()) ? it->second : JsonValue(0.0);
+            row["value"] = state_to_json(sc::Store::instance().getRaw(dp_id));
             rows.emplace_back(JsonValue(std::move(row)));
         }
     }
@@ -460,16 +493,13 @@ void Module::handle_get_dp(const JsonValue& data) {
 
 void Module::handle_get_dp_all() {
     JsonValue::Array rows;
-    {
-        std::lock_guard<std::mutex> lk(dp_mu_);
-        rows.reserve(dp_values_.size());
-        for (const auto& [dp_id, value] : dp_values_) {
-            JsonValue::Object row;
-            row["dp"] = JsonValue(static_cast<int64_t>(dp_id));
-            row["value"] = value;
-            rows.emplace_back(JsonValue(std::move(row)));
-        }
-    }
+    sc::Store::instance().forEachDp([&rows](int dp_id, const sc::StateType& val) {
+        JsonValue::Object row;
+        row["dp"] = JsonValue(static_cast<int64_t>(dp_id));
+        row["value"] = state_to_json(val);
+        rows.emplace_back(JsonValue(std::move(row)));
+    });
+
     JsonValue::Object out;
     out["cmd"] = JsonValue(static_cast<int64_t>(kCmdGetDp));
     out["data"] = JsonValue(std::move(rows));
@@ -528,6 +558,95 @@ void Module::handle_sync_files(const JsonValue& data) {
 
     publish_sync_progress(100);
     publish_sync_result(result.ok, result.message);
+}
+
+constexpr int kSysCmdRequestDpInfo = 6;
+constexpr int kSysCmdModelSwap    = 7;
+constexpr int kSysCmdModelAdd     = 8;
+constexpr int kSysCmdModelRemove  = 9;
+constexpr int kSysCmdModelEnable  = 10;
+constexpr int kSysCmdModelList    = 11;
+
+void Module::handle_sys_cmd(const JsonValue& data) {
+    int subcmd = -1;
+    if (data.is_number()) {
+        subcmd = data.as_int(-1);
+    } else if (data.is_object()) {
+        if (const auto* sc = data.get("subcmd"); sc && sc->is_number())
+            subcmd = sc->as_int(-1);
+    }
+
+    switch (subcmd) {
+        case kSysCmdRequestDpInfo:
+            publish_dp_info();
+            break;
+        case kSysCmdModelSwap:
+        case kSysCmdModelAdd:
+        case kSysCmdModelRemove:
+        case kSysCmdModelEnable:
+        case kSysCmdModelList: {
+            std::lock_guard<std::mutex> lk(sys_cmd_mu_);
+            pending_sys_cmds_.push({subcmd, data});
+            break;
+        }
+        default:
+            publish_notification("sysCmd subcmd not supported", "warning");
+            break;
+    }
+}
+
+bool Module::popSysCmd(SysCmdRequest& out) {
+    std::lock_guard<std::mutex> lk(sys_cmd_mu_);
+    if (pending_sys_cmds_.empty()) return false;
+    out = std::move(pending_sys_cmds_.front());
+    pending_sys_cmds_.pop();
+    return true;
+}
+
+void Module::respondSysCmd(bool success, const std::string& message,
+                            const JsonValue& data) {
+    JsonValue::Object msg_obj;
+    msg_obj["text"] = JsonValue(message);
+    msg_obj["type"] = JsonValue(std::string(success ? "success" : "error"));
+    if (data.is_object() || data.is_array()) {
+        msg_obj["data"] = data;
+    }
+    JsonValue::Object payload;
+    payload["id"] = JsonValue(static_cast<int64_t>(0));
+    payload["message"] = JsonValue(std::move(msg_obj));
+    publish_json(topic_msg_, JsonValue(std::move(payload)));
+}
+
+void Module::publish_dp_info() {
+    JsonValue::Array dp_list;
+
+    sc::Store::instance().forEachDp([&dp_list](int dp_id, const sc::StateType& val) {
+        const char* name = sc::SoulCamDp::keyName(dp_id);
+        const char* type_str = std::visit([](auto&& arg) -> const char* {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, bool>)        return "bool";
+            else if constexpr (std::is_same_v<T, std::string>) return "string";
+            else                                           return "value";
+        }, val);
+
+        JsonValue::Object entry;
+        entry["dp"]   = JsonValue(static_cast<int64_t>(dp_id));
+        entry["name"] = JsonValue(std::string(name));
+        entry["type"] = JsonValue(std::string(type_str));
+        dp_list.emplace_back(JsonValue(std::move(entry)));
+    });
+
+    int count = static_cast<int>(dp_list.size());
+
+    JsonValue::Object message;
+    message["dpList"] = JsonValue(std::move(dp_list));
+
+    JsonValue::Object payload;
+    payload["id"]      = JsonValue(static_cast<int64_t>(2));
+    payload["message"] = JsonValue(std::move(message));
+    publish_json(topic_msg_, JsonValue(std::move(payload)));
+
+    SC_LOG_INFO("Soullink published DP info (%d entries)", count);
 }
 
 void Module::publish_unsupported(const JsonValue& cmd_value) {
@@ -805,21 +924,24 @@ void Module::publish_health() {
     bool rtsp_ok = check_rtsp_reachable();
     bool ready = rtsp_ok && frame_receiver_started_;
 
+    auto& store = sc::Store::instance();
+    store.set(sc::SoulCamDp::rtsp_online, rtsp_ok, false);
+    store.set(sc::SoulCamDp::stream_subscribed, stream_subscribed_.load(), false);
+    store.set(sc::SoulCamDp::module_ready, ready, false);
+
+    constexpr int health_dps[] = {
+        sc::SoulCamDp::rtsp_online,
+        sc::SoulCamDp::stream_subscribed,
+        sc::SoulCamDp::module_ready,
+    };
+
     JsonValue::Array data;
-    JsonValue::Object dp_rtsp;
-    dp_rtsp["dp"] = JsonValue(static_cast<int64_t>(1001));
-    dp_rtsp["value"] = JsonValue(rtsp_ok ? 1.0 : 0.0);
-    data.emplace_back(JsonValue(std::move(dp_rtsp)));
-
-    JsonValue::Object dp_stream;
-    dp_stream["dp"] = JsonValue(static_cast<int64_t>(1002));
-    dp_stream["value"] = JsonValue(stream_subscribed_ ? 1.0 : 0.0);
-    data.emplace_back(JsonValue(std::move(dp_stream)));
-
-    JsonValue::Object dp_ready;
-    dp_ready["dp"] = JsonValue(static_cast<int64_t>(1003));
-    dp_ready["value"] = JsonValue(ready ? 1.0 : 0.0);
-    data.emplace_back(JsonValue(std::move(dp_ready)));
+    for (int dp : health_dps) {
+        JsonValue::Object row;
+        row["dp"] = JsonValue(static_cast<int64_t>(dp));
+        row["value"] = state_to_json(store.getRaw(dp));
+        data.emplace_back(JsonValue(std::move(row)));
+    }
 
     JsonValue::Object payload;
     payload["cmd"] = JsonValue(static_cast<int64_t>(kCmdGetDp));

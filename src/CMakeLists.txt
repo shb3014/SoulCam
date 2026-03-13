@@ -82,6 +82,8 @@ endif()
 # ---------------------------------------------------------------------------
 set(SOULCAM_SOURCES
     main.cpp
+    store/store_config.cpp
+    store/store.cpp
     soullink/json.cpp
     soullink/sync_engine.cpp
     soullink/module.cpp

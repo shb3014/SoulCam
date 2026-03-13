@@ -1,6 +1,7 @@
 #pragma once
 
 #include "soulcam.h"
+#include "store/store.h"
 #include "soullink/json.h"
 #include "soullink/sync_engine.h"
 
@@ -8,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <sys/types.h>
 #include <thread>
@@ -15,6 +17,11 @@
 #include <vector>
 
 namespace sc::soullink {
+
+struct SysCmdRequest {
+    int subcmd = -1;
+    JsonValue data;
+};
 
 class Module {
 public:
@@ -24,6 +31,10 @@ public:
     bool start();
     void stop();
     void poll();
+
+    bool popSysCmd(SysCmdRequest& out);
+    void respondSysCmd(bool success, const std::string& message,
+                       const JsonValue& data = JsonValue());
 
 private:
     bool init_identity();
@@ -54,6 +65,8 @@ private:
     void handle_unsub_stream(const JsonValue& data);
     void handle_streaming(const JsonValue& data);
     void handle_sync_files(const JsonValue& data);
+    void handle_sys_cmd(const JsonValue& data);
+    void publish_dp_info();
     void publish_unsupported(const JsonValue& cmd_value);
 
     bool publish_json(const std::string& topic, const JsonValue& payload);
@@ -106,15 +119,16 @@ private:
     std::thread frame_receiver_thread_;
     std::thread control_api_thread_;
 
-    mutable std::mutex dp_mu_;
     std::mutex mqtt_mu_;
-    std::unordered_map<int, JsonValue> dp_values_;
     std::string mqtt_host_runtime_;
     int control_api_listen_fd_ = -1;
 
     SyncEngine sync_engine_;
     std::chrono::steady_clock::time_point last_health_publish_{};
     std::chrono::steady_clock::time_point last_mdns_refresh_{};
+
+    std::mutex sys_cmd_mu_;
+    std::queue<SysCmdRequest> pending_sys_cmds_;
 };
 
 }  // namespace sc::soullink

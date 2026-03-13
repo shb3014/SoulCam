@@ -44,6 +44,7 @@
 // ============================================================================
 
 #include "soulcam.h"
+#include "store/store.h"
 #include "pipeline/isp_config.h"
 #include "pipeline/rtsp_server.h"
 #include "pipeline/ai_capture.h"
@@ -219,7 +220,6 @@ static void print_usage(const char* prog) {
         "  --bitrate K        H.264 bitrate kbps  (default: 4000)\n"
         "  --port P           RTSP port           (default: 8554)\n"
         "  --mount M          RTSP mount point    (default: /cam)\n"
-        "  --encoder E        mpp|x264            (default: mpp)\n"
         "\n"
         "Sensor options:\n"
         "  --sensor-width W   Sensor mode width   (default: 1296)\n"
@@ -228,23 +228,14 @@ static void print_usage(const char* prog) {
         "AI options:\n"
         "  --ai               Enable AI pipeline on selfpath\n"
         "  --overlay          Draw detection boxes on RTSP stream (requires --ai)\n"
-        "  --onvif            Enable ONVIF metadata stream on port+1 (requires --ai)\n"
-        "\n"
-        "ONVIF device service:\n"
-        "  --onvif-device     Enable ONVIF device service (WS-Discovery + SOAP)\n"
+        "  --onvif            Enable ONVIF (metadata stream + device service)\n"
         "  --onvif-port P     ONVIF HTTP port (default: 8080)\n"
-        "\n"
-        "Snapshot:\n"
         "  --snapshot         Enable JPEG snapshot HTTP server\n"
         "  --snapshot-port P  Snapshot HTTP port (default: 8088)\n"
         "\n"
-        "Performance options:\n"
-        "  --dmabuf           Use DMA-BUF io-mode for zero-copy ISP→RGA→MPP\n"
+        "Model options:\n"
         "  --model PATH       Primary RKNN model (slot 0)\n"
         "  --model-weight W   Primary model weighted-scheduler share (default: 1)\n"
-        "  --ai-width W       AI capture width    (default: 640)\n"
-        "  --ai-height H      AI capture height   (default: 480)\n"
-        "  --ai-fps F         AI capture FPS      (default: 30)\n"
         "  --conf-thresh F    Detection confidence (default: 0.25)\n"
         "  --nms-thresh F     NMS threshold       (default: 0.45)\n"
         "  --labels L         Comma-separated class labels (e.g. \"hand\")\n"
@@ -289,9 +280,6 @@ static void print_usage(const char* prog) {
         "  --soullink-mqtt-prefix T MQTT topic prefix (default: soulcam/debug/)\n"
         "  --soullink-mqtt-user U   MQTT username\n"
         "  --soullink-mqtt-pass P   MQTT password\n"
-        "  --soullink-api-port P    API/mDNS advertised port (default: 5212)\n"
-        "  --soullink-stream-port P TCP JPEG stream ingress port (default: 1234)\n"
-        "  --soullink-stream-index I streamIndex for uplink topic (default: 0)\n"
         "  --soullink-mdns-refresh N periodic mDNS refresh seconds (default: 5)\n"
         "  --soullink-sync-root PATH syncFiles managed root\n"
         "  --soullink-sync-state PATH persisted commitID state file\n"
@@ -336,22 +324,16 @@ static sc::Config parse_args(int argc, char** argv) {
         {"bitrate",       required_argument, nullptr, 'b'},
         {"port",          required_argument, nullptr, 'p'},
         {"mount",         required_argument, nullptr, 'm'},
-        {"encoder",       required_argument, nullptr, 'e'},
         {"sensor-width",  required_argument, nullptr, 'S'},
         {"sensor-height", required_argument, nullptr, 'T'},
         {"ai",            no_argument,       nullptr, 'A'},
         {"overlay",       no_argument,       nullptr, 'O'},
         {"onvif",         no_argument,       nullptr, 'N'},
-        {"onvif-device",  no_argument,       nullptr, 'Q'},
         {"onvif-port",    required_argument, nullptr, 'R'},
         {"snapshot",      no_argument,       nullptr, 'J'},
         {"snapshot-port", required_argument, nullptr, 'K'},
-        {"dmabuf",        no_argument,       nullptr, 'D'},
         {"model",         required_argument, nullptr, 'M'},
         {"model-weight",  required_argument, nullptr, 20},
-        {"ai-width",      required_argument, nullptr, 'w'},
-        {"ai-height",     required_argument, nullptr, 'x'},
-        {"ai-fps",        required_argument, nullptr, 'F'},
         {"conf-thresh",   required_argument, nullptr, 'c'},
         {"nms-thresh",    required_argument, nullptr, 'n'},
         {"labels",        required_argument, nullptr, 'L'},
@@ -374,9 +356,6 @@ static sc::Config parse_args(int argc, char** argv) {
         {"soullink-mqtt-prefix", required_argument, nullptr, 46},
         {"soullink-mqtt-user", required_argument, nullptr, 47},
         {"soullink-mqtt-pass", required_argument, nullptr, 48},
-        {"soullink-api-port", required_argument, nullptr, 49},
-        {"soullink-stream-port", required_argument, nullptr, 50},
-        {"soullink-stream-index", required_argument, nullptr, 51},
         {"soullink-mdns-refresh", required_argument, nullptr, 56},
         {"soullink-sync-root", required_argument, nullptr, 52},
         {"soullink-sync-state", required_argument, nullptr, 53},
@@ -413,22 +392,16 @@ static sc::Config parse_args(int argc, char** argv) {
             case 'b': cfg.rtsp.bitrate_kbps  = atoi(optarg); break;
             case 'p': cfg.rtsp.port          = atoi(optarg); break;
             case 'm': cfg.rtsp.mount         = optarg;       break;
-            case 'e': cfg.rtsp.encoder       = optarg;       break;
             case 'S': cfg.sensor.width       = atoi(optarg); break;
             case 'T': cfg.sensor.height      = atoi(optarg); break;
             case 'A': cfg.enable_ai          = true;         break;
             case 'O': cfg.enable_overlay    = true;         break;
-            case 'N': cfg.enable_onvif     = true;         break;
-            case 'Q': cfg.enable_onvif_device = true;       break;
+            case 'N': cfg.enable_onvif     = true; cfg.enable_onvif_device = true; break;
             case 'R': cfg.onvif_port       = atoi(optarg);  break;
             case 'J': cfg.enable_snapshot   = true;         break;
             case 'K': cfg.snapshot_port     = atoi(optarg);  break;
-            case 'D': cfg.use_dmabuf        = true;         break;
             case 'M': cfg.rknn.model_path    = optarg;       break;
             case 20:  cfg.primary_model_weight = atoi(optarg); break;
-            case 'w': cfg.ai.width           = atoi(optarg); break;
-            case 'x': cfg.ai.height          = atoi(optarg); break;
-            case 'F': cfg.ai.fps             = atoi(optarg); break;
             case 'c': cfg.rknn.conf_threshold = atof(optarg); break;
             case 'n': cfg.rknn.nms_threshold  = atof(optarg); break;
             case 'L': cfg.rknn.labels         = optarg;       break;
@@ -451,9 +424,6 @@ static sc::Config parse_args(int argc, char** argv) {
             case 46:  cfg.soullink.mqtt_topic_prefix = optarg; break;
             case 47:  cfg.soullink.mqtt_username = optarg;   break;
             case 48:  cfg.soullink.mqtt_password = optarg;   break;
-            case 49:  cfg.soullink.api_port = atoi(optarg);  break;
-            case 50:  cfg.soullink.stream_tcp_port = atoi(optarg); break;
-            case 51:  cfg.soullink.stream_index = atoi(optarg); break;
             case 56:  cfg.soullink.mdns_refresh_sec = atoi(optarg); break;
             case 52:  cfg.soullink.sync_root = optarg;       break;
             case 53:  cfg.soullink.sync_state_path = optarg; break;
@@ -518,11 +488,6 @@ static sc::Config parse_args(int argc, char** argv) {
     if (cfg.test_weight_low < 1) cfg.test_weight_low = 1;
     if (cfg.test_no_hand_frames_to_fallback < 1) cfg.test_no_hand_frames_to_fallback = 1;
     if (cfg.soullink.mqtt_port < 1 || cfg.soullink.mqtt_port > 65535) cfg.soullink.mqtt_port = 1883;
-    if (cfg.soullink.api_port < 1 || cfg.soullink.api_port > 65535) cfg.soullink.api_port = 5212;
-    if (cfg.soullink.stream_tcp_port < 1 || cfg.soullink.stream_tcp_port > 65535) {
-        cfg.soullink.stream_tcp_port = 1234;
-    }
-    if (cfg.soullink.stream_index < 0) cfg.soullink.stream_index = 0;
     if (cfg.soullink.mdns_refresh_sec < 1) cfg.soullink.mdns_refresh_sec = 5;
     if (cfg.soullink.mqtt_topic_prefix.empty()) cfg.soullink.mqtt_topic_prefix = "soulcam/debug/";
 
@@ -881,11 +846,217 @@ static void ctrl_poll(sc::AiCapture* ai, sc::Config& cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// SoulLink sysCmd model operations (subcmds 7-11)
+// ---------------------------------------------------------------------------
+
+static void process_soullink_sys_cmd(
+    sc::soullink::Module* sl, sc::AiCapture* ai, sc::Config& cfg,
+    const sc::soullink::SysCmdRequest& req)
+{
+    auto get_str = [&](const char* key) -> std::string {
+        if (!req.data.is_object()) return {};
+        const auto* v = req.data.get(key);
+        return (v && v->is_string()) ? v->as_string() : std::string{};
+    };
+    auto get_int = [&](const char* key, int def) -> int {
+        if (!req.data.is_object()) return def;
+        const auto* v = req.data.get(key);
+        return (v && v->is_number()) ? v->as_int(def) : def;
+    };
+    auto get_float = [&](const char* key, float def) -> float {
+        if (!req.data.is_object()) return def;
+        const auto* v = req.data.get(key);
+        return (v && v->is_number()) ? static_cast<float>(v->as_number()) : def;
+    };
+    auto get_bool = [&](const char* key, bool def) -> bool {
+        if (!req.data.is_object()) return def;
+        const auto* v = req.data.get(key);
+        return (v && v->is_bool()) ? v->as_bool() : def;
+    };
+
+    switch (req.subcmd) {
+        case 7: { // model swap: {subcmd:7, slot:0, path:"...", conf:0.3}
+            std::string path = get_str("path");
+            if (path.empty()) {
+                sl->respondSysCmd(false, "swap: missing 'path'");
+                return;
+            }
+            if (!ai) {
+                sl->respondSysCmd(false, "swap: AI pipeline not running");
+                return;
+            }
+            int slot = get_int("slot", 0);
+            sc::RknnConfig rc;
+            rc.model_path     = path;
+            rc.conf_threshold = get_float("conf", cfg.rknn.conf_threshold);
+            rc.nms_threshold  = get_float("nms", 0.45f);
+            int err = sc::ai_capture_swap_model(ai, rc, slot);
+            if (err == 0) {
+                if (slot == 0) {
+                    cfg.rknn.model_path = path;
+                    cfg.rknn.conf_threshold = rc.conf_threshold;
+                }
+                g_hand_tracker.reset();
+                sl->respondSysCmd(true, "slot " + std::to_string(slot) + " swapped to " + path);
+            } else {
+                sl->respondSysCmd(false, "swap failed for slot " + std::to_string(slot));
+            }
+            break;
+        }
+        case 8: { // model add: {subcmd:8, path:"...", conf:0.3, skip:0, weight:1}
+            std::string path = get_str("path");
+            if (path.empty()) { sl->respondSysCmd(false, "add: missing 'path'"); return; }
+            if (!ai) { sl->respondSysCmd(false, "add: AI pipeline not running"); return; }
+            sc::ModelSlotConfig slot_cfg;
+            slot_cfg.rknn.model_path     = path;
+            slot_cfg.rknn.conf_threshold = get_float("conf", cfg.rknn.conf_threshold);
+            slot_cfg.rknn.nms_threshold  = 0.45f;
+            slot_cfg.skip_frames         = get_int("skip", 0);
+            slot_cfg.run_weight          = get_int("weight", 1);
+            int idx = sc::ai_capture_add_model(ai, slot_cfg);
+            if (idx >= 0) {
+                g_hand_tracker.reset();
+                sl->respondSysCmd(true, "added model slot " + std::to_string(idx));
+            } else {
+                sl->respondSysCmd(false, "add model failed");
+            }
+            break;
+        }
+        case 9: { // model remove: {subcmd:9, slot:1}
+            int slot = get_int("slot", -1);
+            if (slot <= 0) { sl->respondSysCmd(false, "remove: 'slot' must be > 0"); return; }
+            if (!ai) { sl->respondSysCmd(false, "remove: AI pipeline not running"); return; }
+            int err = sc::ai_capture_remove_model(ai, slot);
+            if (err == 0) {
+                g_hand_tracker.reset();
+                sl->respondSysCmd(true, "removed slot " + std::to_string(slot));
+            } else {
+                sl->respondSysCmd(false, "remove failed for slot " + std::to_string(slot));
+            }
+            break;
+        }
+        case 10: { // model enable: {subcmd:10, slot:1, enable:true}
+            int slot = get_int("slot", -1);
+            if (slot < 0) { sl->respondSysCmd(false, "enable: missing 'slot'"); return; }
+            if (!ai) { sl->respondSysCmd(false, "enable: AI pipeline not running"); return; }
+            bool en = get_bool("enable", true);
+            sc::ai_capture_enable_model(ai, slot, en);
+            sl->respondSysCmd(true, "slot " + std::to_string(slot) + (en ? " enabled" : " disabled"));
+            break;
+        }
+        case 11: { // model list
+            if (!ai) { sl->respondSysCmd(false, "list: AI pipeline not running"); return; }
+            using JV = sc::soullink::JsonValue;
+            int count = sc::ai_capture_model_count(ai);
+            JV::Array arr;
+            for (int i = 0; i < count; i++) {
+                auto info = sc::ai_capture_get_model_info(ai, i);
+                JV::Object obj;
+                obj["slot"]    = JV(static_cast<int64_t>(i));
+                obj["name"]    = JV(info.name);
+                obj["path"]    = JV(info.rknn.model_path);
+                obj["conf"]    = JV(static_cast<double>(info.rknn.conf_threshold));
+                obj["skip"]    = JV(static_cast<int64_t>(info.skip_frames));
+                obj["weight"]  = JV(static_cast<int64_t>(info.run_weight));
+                obj["enabled"] = JV(info.enabled);
+                arr.emplace_back(JV(std::move(obj)));
+            }
+            sl->respondSysCmd(true, std::to_string(count) + " model slot(s)",
+                              JV(std::move(arr)));
+            break;
+        }
+        default:
+            sl->respondSysCmd(false, "unknown sysCmd subcmd " + std::to_string(req.subcmd));
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Store <-> Config bridging
+// ---------------------------------------------------------------------------
+
+static void config_to_store(const sc::Config& cfg) {
+    using namespace sc::SoulCamDp;
+    auto& s = sc::Store::instance();
+
+    s.set(stream_width,        (uint32_t)cfg.stream.width);
+    s.set(stream_height,       (uint32_t)cfg.stream.height);
+    s.set(stream_fps,          (uint32_t)cfg.stream.fps);
+    s.set(rtsp_bitrate,        (uint32_t)cfg.rtsp.bitrate_kbps);
+    s.set(rtsp_port,           (uint32_t)cfg.rtsp.port);
+    s.set(rtsp_mount,          std::string(cfg.rtsp.mount));
+    s.set(enable_ai,           cfg.enable_ai);
+    s.set(enable_overlay,      cfg.enable_overlay);
+    s.set(ai_conf_threshold,   cfg.rknn.conf_threshold);
+    s.set(ai_model_path,       std::string(cfg.rknn.model_path));
+    s.set(ai_labels,           std::string(cfg.rknn.labels));
+    s.set(enable_soullink,     cfg.soullink.enable);
+    s.set(enable_onvif,        cfg.enable_onvif);
+    s.set(verbose,             cfg.verbose);
+    s.set(adaptive_tracking,   cfg.test_adaptive_hand_person);
+    s.set(weighted_scheduler,  cfg.weighted_scheduler);
+    s.set(max_models_per_frame,(uint32_t)cfg.max_models_per_frame);
+    s.set(soullink_sync_root,  std::string(cfg.soullink.sync_root));
+    if (!cfg.extra_models.empty()) {
+        s.set(model2_path, std::string(cfg.extra_models[0].rknn.model_path));
+        s.set(model2_conf, cfg.extra_models[0].rknn.conf_threshold);
+    }
+}
+
+static void store_to_config(sc::Config& cfg) {
+    using namespace sc::SoulCamDp;
+    auto& s = sc::Store::instance();
+
+    cfg.stream.width          = (int)s.get<uint32_t>(stream_width);
+    cfg.stream.height         = (int)s.get<uint32_t>(stream_height);
+    cfg.stream.fps            = (int)s.get<uint32_t>(stream_fps);
+    cfg.rtsp.bitrate_kbps     = (int)s.get<uint32_t>(rtsp_bitrate);
+    cfg.rtsp.port             = (int)s.get<uint32_t>(rtsp_port);
+    cfg.rtsp.mount            = s.get<std::string>(rtsp_mount);
+    cfg.enable_ai             = s.get<bool>(enable_ai);
+    cfg.enable_overlay        = s.get<bool>(enable_overlay);
+    cfg.rknn.conf_threshold   = s.get<float>(ai_conf_threshold);
+    cfg.rknn.model_path       = s.get<std::string>(ai_model_path);
+    cfg.rknn.labels           = s.get<std::string>(ai_labels);
+    cfg.soullink.enable       = s.get<bool>(enable_soullink);
+    cfg.enable_onvif          = s.get<bool>(enable_onvif);
+    cfg.verbose               = s.get<bool>(verbose);
+    cfg.soullink.sync_root    = s.get<std::string>(soullink_sync_root);
+    cfg.test_adaptive_hand_person = s.get<bool>(adaptive_tracking);
+    cfg.weighted_scheduler    = s.get<bool>(weighted_scheduler);
+    cfg.max_models_per_frame  = (int)s.get<uint32_t>(max_models_per_frame);
+
+    // Model 2 from DPs (if not already loaded from CLI)
+    std::string m2 = s.get<std::string>(model2_path);
+    if (!m2.empty() && cfg.extra_models.empty()) {
+        sc::ModelSlotConfig slot;
+        slot.rknn.model_path     = m2;
+        slot.rknn.conf_threshold = s.get<float>(model2_conf);
+        slot.rknn.nms_threshold  = 0.45f;
+        cfg.extra_models.push_back(std::move(slot));
+    }
+    if (cfg.test_adaptive_hand_person) cfg.weighted_scheduler = true;
+
+    // Derived / hard-coded (no longer DPs)
+    cfg.rtsp.gop              = cfg.stream.fps;
+    cfg.rtsp.encoder          = "mpp";
+    cfg.enable_onvif_device   = cfg.enable_onvif;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 int main(int argc, char** argv) {
+    // 1. Parse CLI args into Config (sets all fields including defaults)
     sc::Config cfg = parse_args(argc, argv);
+
+    // 2. Initialize Store: defaults -> load persisted -> overlay CLI values
+    sc::Store::instance().initialize();
+    sc::Store::instance().load();
+    config_to_store(cfg);         // CLI overrides take priority
+    sc::Store::instance().save(); // persist the merged state
+    store_to_config(cfg);         // ensure Config is in sync
     g_enable_hand_tracker = should_enable_hand_target_tracker(cfg);
     g_hand_tracker.set_config(make_hand_tracker_config(cfg), true);
     g_adaptive_test_cfg.enabled = cfg.test_adaptive_hand_person;
@@ -1036,7 +1207,7 @@ int main(int argc, char** argv) {
                     cfg.stream.width, cfg.stream.height, cfg.stream.fps,
                     cfg.stream.src_fmt.c_str());
     }
-    SC_LOG_INFO("  I/O mode: %s", cfg.use_dmabuf ? "dmabuf (zero-copy)" : "userptr");
+    SC_LOG_INFO("  I/O mode: userptr");
     if (ai) {
         int model_count = sc::ai_capture_model_count(ai);
         SC_LOG_INFO("  AI: selfpath %dx%d@%d %s -> %d model slot(s)",
@@ -1072,10 +1243,16 @@ int main(int argc, char** argv) {
     SC_LOG_INFO("  Press Ctrl+C to stop");
     fprintf(stderr, "\n");
 
-    // --- Main loop: poll control socket ---
+    // --- Main loop: poll control socket + SoulLink commands ---
     while (!g_shutdown) {
         ctrl_poll(ai, cfg);
-        if (soullink) soullink->poll();
+        if (soullink) {
+            soullink->poll();
+            sc::soullink::SysCmdRequest req;
+            while (soullink->popSysCmd(req)) {
+                process_soullink_sys_cmd(soullink.get(), ai, cfg, req);
+            }
+        }
         usleep(100000);  // 100ms polling interval
     }
 

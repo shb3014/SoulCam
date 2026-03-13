@@ -1,37 +1,117 @@
-# SoulCam DP Catalog (Initial)
+# SoulCam DP Catalog
 
-This catalog documents the currently implemented DP behavior in the native Soullink C++ module.
+All configuration and runtime state is managed through the **Store** system
+(`src/store/`), which mirrors the Ivy `SystemStore` pattern.  
+DPs are backed by typed `StateType = std::variant<uint32_t, int, float, bool, std::string>`.
 
-## Implemented DP IDs
+Remote access: `setDp`/`getDp`/`getDpAll` over MQTT, plus `sysCmd(data=6)` for
+the full DP metadata list (section 8.4 of `soullink_client.md`).
 
-The phase-1 implementation allows dynamic DP keys and does not hardcode a closed DP list yet.
+---
 
-### Common defaults used by the module
+## Persist DPs — Numeric (saved to `/var/lib/soulcam/store.json`)
 
-- `1001` - RTSP online (`0|1`)
-- `1002` - Stream subscription active (`0|1`)
-- `1003` - Module ready (`0|1`)
+| DP | Name | Type | Default | Description |
+|---:|------|------|--------:|-------------|
+| 1 | `stream_width` | u32 | 1280 | ISP main-path capture width in px. |
+| 2 | `stream_height` | u32 | 960 | ISP main-path capture height in px. |
+| 3 | `stream_fps` | u32 | 30 | V4L2 capture framerate. Also derives RTSP GOP (1 keyframe/sec). |
+| 4 | `rtsp_bitrate` | u32 | 4000 | H.264 target bitrate in kbps. |
+| 5 | `rtsp_port` | u32 | 8554 | TCP port the RTSP server listens on. |
+| 6 | `enable_ai` | bool | false | Master switch for AI inference pipeline (selfpath + RKNN). |
+| 7 | `enable_overlay` | bool | false | Draw bounding-box overlays on RTSP stream (requires AI). |
+| 8 | `ai_conf_threshold` | float | 0.25 | Minimum detection confidence score for primary model. |
+| 9 | `enable_soullink` | bool | true | Start the SoulLink module (mDNS + MQTT + SoulCmd). |
+| 10 | `enable_onvif` | bool | false | Start ONVIF metadata stream + WS-Discovery device service. |
+| 11 | `verbose` | bool | false | Set log level to DEBUG. |
+| 12 | `model2_conf` | float | 0.25 | Confidence threshold for second model slot. |
+| 13 | `adaptive_tracking` | bool | false | Enable adaptive hand/person tracking policy. Implies weighted scheduler. |
+| 14 | `weighted_scheduler` | bool | false | Enable weighted round-robin model scheduler (vs run-all). |
+| 15 | `max_models_per_frame` | u32 | 1 | Max model slots to run per frame in weighted scheduler mode. |
 
-## Command behavior
+## Persist DPs — String (offset 100+)
 
-- `setDp` (`cmd=0`): accepts `data` list of `{ "dp": <int>, "value": <any> }` and updates in-memory state.
-- `getDp` (`cmd=1`): accepts list of DP IDs (or `{ "dp": <id> }` objects) and returns matching values.
-- `getDpAll` (`cmd=2`): returns all in-memory DP values.
+| DP | Name | Type | Default | Description |
+|---:|------|------|---------|-------------|
+| 101 | `rtsp_mount` | string | `"/cam"` | RTSP URL mount point (e.g. `rtsp://device:8554/cam`). |
+| 102 | `ai_model_path` | string | `""` | Filesystem path to the primary RKNN model (slot 0). |
+| 103 | `ai_labels` | string | `""` | Comma-separated class labels (e.g. `"person,car,dog"`). |
+| 104 | `soullink_sync_root` | string | `"/home/ubuntu/SoulCam"` | Root directory for `syncFiles` protocol. |
+| 105 | `model2_path` | string | `""` | Filesystem path to second RKNN model (slot 1). Empty = no model 2. |
 
-DP uplink reports are published on `out/<clientId>` using:
+## RAM DPs — Runtime only (not persisted)
+
+| DP | Name | Type | Default | Description |
+|---:|------|------|---------|-------------|
+| 1001 | `rtsp_online` | bool | false | RTSP server reachable (updated by health heartbeat). |
+| 1002 | `stream_subscribed` | bool | false | SoulFlow has an active `subStream` subscription. |
+| 1003 | `module_ready` | bool | false | Composite: `rtsp_online && frame_receiver_started`. |
+
+**Total: 23 DPs** (15 numeric persist + 5 string persist + 3 RAM)
+
+---
+
+## SoulLink command behavior
+
+### DP commands (existing)
+
+- **`setDp`** (`cmd=0`): Type-safe update via `Store::setFromJson()`. Persist DPs auto-save.
+- **`getDp`** (`cmd=1`): Read specific DPs from Store.
+- **`getDpAll`** (`cmd=2`): Read all DPs.
+
+### sysCmd sub-commands (`cmd=21`)
+
+| subcmd | Name | data format | Description |
+|-------:|------|-------------|-------------|
+| 6 | DP info | `6` (number) | Returns full DP metadata list (`id=2`, `dpList`) on `m/` topic. |
+| 7 | Model swap | `{"subcmd":7, "slot":0, "path":"...", "conf":0.3}` | Hot-swap a model in a running slot. |
+| 8 | Model add | `{"subcmd":8, "path":"...", "conf":0.3, "skip":0, "weight":1}` | Add a new model slot at runtime. |
+| 9 | Model remove | `{"subcmd":9, "slot":1}` | Remove a model slot (slot > 0 only). |
+| 10 | Model enable | `{"subcmd":10, "slot":1, "enable":true}` | Enable/disable a model slot. |
+| 11 | Model list | `{"subcmd":11}` | Returns all model slots with path, conf, weight, enabled status. |
+
+**Example (SoulFlow Cmd node):**
 
 ```json
-{
-  "cmd": 1,
-  "data": [
-    { "dp": 1001, "value": 1 }
-  ]
-}
+{"cmd": 21, "data": {"subcmd": 7, "slot": 1, "path": "/home/ubuntu/models/hand.rknn", "conf": 0.10}}
 ```
 
-## Pending host-team confirmation
+Responses are published on the `m/` topic as notifications (`id=0`).
+Model list (subcmd 11) returns slot details in `message.data`.
 
-- Final authoritative DP ID list.
-- Types/ranges and read-write policy for each DP.
-- Mandatory DP set required for host UI and health dashboards.
+---
 
+## Configuration flow
+
+### Startup
+
+1. `Store::initialize()` — allocate cache with defaults
+2. `Store::load()` — read `/var/lib/soulcam/store.json`
+3. `config_to_store()` — CLI args override loaded values
+4. `Store::save()` — persist merged state
+5. `store_to_config()` — rebuild `sc::Config` from Store for pipeline init
+
+### Runtime via SoulFlow
+
+- **Persistent config** (DPs): Use `setDp` to change values like `model2_path`,
+  `adaptive_tracking`, `ai_conf_threshold`. Changes persist and take effect on
+  next restart.
+- **Immediate model operations**: Use `sysCmd` subcmds 7-11 to hot-swap, add,
+  remove, or enable/disable model slots without restarting.
+
+### Example: configure adaptive hand tracking from SoulFlow
+
+```
+1. setDp: model2_path = "/home/ubuntu/models/hand.rknn"
+2. setDp: model2_conf = 0.10
+3. setDp: adaptive_tracking = true
+4. setDp: max_models_per_frame = 1
+5. Restart soulcam (DPs persist)
+```
+
+Or for immediate model swap:
+
+```
+1. sysCmd: {"subcmd": 8, "path": "/home/ubuntu/models/hand.rknn", "conf": 0.10}
+2. sysCmd: {"subcmd": 10, "slot": 1, "enable": true}
+```
