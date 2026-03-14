@@ -12,6 +12,7 @@ enum class LogLevel { DEBUG, INFO, WARN, ERROR };
 
 void log_set_level(LogLevel lvl);
 void log_msg(LogLevel lvl, const char* tag, const char* fmt, ...);
+void log_redirect_stderr_quiet();
 
 }  // namespace sc
 

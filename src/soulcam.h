@@ -9,6 +9,7 @@
 // ============================================================================
 
 #include <cstdint>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -197,6 +198,9 @@ struct Config {
 
     // Soullink module (native in-process integration).
     SoullinkConfig soullink;
+
+    // DPs explicitly set via CLI (only these override persisted store values)
+    std::set<int> cli_overrides;
 };
 
 // ---------------------------------------------------------------------------

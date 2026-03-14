@@ -42,6 +42,10 @@ namespace SoulCamDp {
         weighted_scheduler,     // bool      false
         max_models_per_frame,   // uint32_t  1
 
+        // Rive renderer
+        enable_rive,            // bool      false
+        rive_resolution,        // uint32_t  500
+
         VALUE_END,
 
         // String persist keys (offset to avoid binary-format issues in future)
@@ -51,6 +55,8 @@ namespace SoulCamDp {
         ai_labels,              // string    ""
         soullink_sync_root,     // string    "/home/ubuntu/SoulCam"
         model2_path,            // string    ""
+        rive_file,              // string    ""
+        rive_target,            // string    "person"
         STRING_END,
 
         PERSIST_END = STRING_END,

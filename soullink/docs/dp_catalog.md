@@ -28,6 +28,8 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 13 | `adaptive_tracking` | bool | false | Enable adaptive hand/person tracking policy. Implies weighted scheduler. |
 | 14 | `weighted_scheduler` | bool | false | Enable weighted round-robin model scheduler (vs run-all). |
 | 15 | `max_models_per_frame` | u32 | 1 | Max model slots to run per frame in weighted scheduler mode. |
+| 16 | `enable_rive` | bool | false | Enable GPU-rendered Rive animation on DRM/KMS display. |
+| 17 | `rive_resolution` | u32 | 500 | Rive render resolution in px (square). Lower = faster. |
 
 ## Persist DPs — String (offset 100+)
 
@@ -38,6 +40,8 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 103 | `ai_labels` | string | `""` | Comma-separated class labels (e.g. `"person,car,dog"`). |
 | 104 | `soullink_sync_root` | string | `"/home/ubuntu/SoulCam"` | Root directory for `syncFiles` protocol. |
 | 105 | `model2_path` | string | `""` | Filesystem path to second RKNN model (slot 1). Empty = no model 2. |
+| 106 | `rive_file` | string | `""` | Filesystem path to .riv animation file. Empty = no animation. |
+| 107 | `rive_target` | string | `"person"` | Detection label to track (e.g. `"person"`, `"hand"`). |
 
 ## RAM DPs — Runtime only (not persisted)
 
@@ -47,7 +51,7 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 1002 | `stream_subscribed` | bool | false | SoulFlow has an active `subStream` subscription. |
 | 1003 | `module_ready` | bool | false | Composite: `rtsp_online && frame_receiver_started`. |
 
-**Total: 23 DPs** (15 numeric persist + 5 string persist + 3 RAM)
+**Total: 27 DPs** (17 numeric persist + 7 string persist + 3 RAM)
 
 ---
 
@@ -115,3 +119,16 @@ Or for immediate model swap:
 1. sysCmd: {"subcmd": 8, "path": "/home/ubuntu/models/hand.rknn", "conf": 0.10}
 2. sysCmd: {"subcmd": 10, "slot": 1, "enable": true}
 ```
+
+### Example: enable Rive animation from SoulFlow
+
+```
+1. setDp: rive_file = "/home/ubuntu/SoulCam/rive-runtime/demos/rk3566_player/riv/avatar.riv"
+2. setDp: rive_resolution = 500
+3. setDp: rive_target = "person"
+4. setDp: enable_rive = true
+```
+
+All four DPs persist and take effect immediately (no restart needed).
+The Rive renderer runs on a dedicated GPU thread (Mali-G52) and does not
+affect RTSP streaming or AI inference performance.

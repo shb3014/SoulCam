@@ -78,6 +78,45 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Rive renderer (optional, for GPU-rendered tracking animations)
+# ---------------------------------------------------------------------------
+set(RIVE_RUNTIME_DIR "${CMAKE_SOURCE_DIR}/../rive-runtime" CACHE PATH "Rive runtime root")
+set(HAVE_RIVE FALSE)
+if(EXISTS "${RIVE_RUNTIME_DIR}/include/rive/artboard.hpp")
+    set(_RIVE_LIB_DIR "${RIVE_RUNTIME_DIR}/renderer/out/release")
+
+    if(EXISTS "${_RIVE_LIB_DIR}/librive.a" AND EXISTS "${_RIVE_LIB_DIR}/librive_pls_renderer.a")
+        set(HAVE_RIVE TRUE)
+
+        set(RIVE_INCLUDE_DIRS
+            "${RIVE_RUNTIME_DIR}/include"
+            "${RIVE_RUNTIME_DIR}/renderer/include"
+            "${RIVE_RUNTIME_DIR}/renderer/src"
+            "/usr/include/libdrm"
+        )
+
+        set(RIVE_STATIC_LIBS
+            "${_RIVE_LIB_DIR}/librive_pls_renderer.a"
+            "${_RIVE_LIB_DIR}/librive_decoders.a"
+            "${_RIVE_LIB_DIR}/liblibpng.a"
+            "${_RIVE_LIB_DIR}/libzlib.a"
+            "${_RIVE_LIB_DIR}/liblibjpeg.a"
+            "${_RIVE_LIB_DIR}/liblibwebp.a"
+            "${_RIVE_LIB_DIR}/librive.a"
+            "${_RIVE_LIB_DIR}/librive_harfbuzz.a"
+            "${_RIVE_LIB_DIR}/librive_sheenbidi.a"
+            "${_RIVE_LIB_DIR}/librive_yoga.a"
+        )
+
+        message(STATUS "Rive found: ${RIVE_RUNTIME_DIR}")
+    else()
+        message(STATUS "Rive headers found but static libs not built -- run premake on device first")
+    endif()
+else()
+    message(STATUS "Rive not found at ${RIVE_RUNTIME_DIR} -- Rive renderer disabled")
+endif()
+
+# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 set(SOULCAM_SOURCES
@@ -100,6 +139,13 @@ set(SOULCAM_SOURCES
     ai/model_pipeline.cpp
     util/logger.cpp
 )
+
+if(HAVE_RIVE)
+    list(APPEND SOULCAM_SOURCES
+        pipeline/rive_renderer.cpp
+        pipeline/drm_egl_context.cpp
+    )
+endif()
 
 add_executable(soulcam ${SOULCAM_SOURCES})
 
@@ -138,6 +184,17 @@ if(HAVE_OPENCV)
     target_include_directories(soulcam PRIVATE ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(soulcam PRIVATE ${OpenCV_LIBS})
     target_compile_definitions(soulcam PRIVATE SOULCAM_HAVE_OPENCV=1)
+endif()
+
+if(HAVE_RIVE)
+    target_include_directories(soulcam PRIVATE ${RIVE_INCLUDE_DIRS})
+    target_link_libraries(soulcam PRIVATE
+        -Wl,--start-group ${RIVE_STATIC_LIBS} -Wl,--end-group
+        EGL GLESv2 drm gbm
+    )
+    target_compile_definitions(soulcam PRIVATE SOULCAM_HAVE_RIVE=1 RIVE_ANDROID=1)
+    # Rive static libs are LLVM bitcode (built with clang LTO); need lld to link
+    target_link_options(soulcam PRIVATE "-fuse-ld=lld")
 endif()
 
 # RGA plugin path -- needed at runtime so rgaconvert is discoverable

@@ -14,7 +14,7 @@ std::unordered_map<int, StateType> getDefaultValueMap() {
         {rtsp_port,             (uint32_t)8554},
 
         // AI
-        {enable_ai,             false},
+        {enable_ai,             true},
         {enable_overlay,        false},
         {ai_conf_threshold,     0.25f},
 
@@ -29,12 +29,18 @@ std::unordered_map<int, StateType> getDefaultValueMap() {
         {weighted_scheduler,    false},
         {max_models_per_frame,  (uint32_t)1},
 
+        // Rive renderer
+        {enable_rive,           false},
+        {rive_resolution,       (uint32_t)500},
+
         // Strings
         {rtsp_mount,            std::string("/cam")},
         {ai_model_path,         std::string("")},
         {ai_labels,             std::string("")},
         {soullink_sync_root,    std::string("/home/ubuntu/SoulCam")},
         {model2_path,           std::string("")},
+        {rive_file,             std::string("")},
+        {rive_target,           std::string("person")},
 
         // RAM (runtime)
         {rtsp_online,           false},
@@ -60,11 +66,15 @@ std::map<std::string, int> getPersistKeyMap() {
         {"adaptive_tracking",     adaptive_tracking},
         {"weighted_scheduler",    weighted_scheduler},
         {"max_models_per_frame",  max_models_per_frame},
+        {"enable_rive",           enable_rive},
+        {"rive_resolution",       rive_resolution},
         {"rtsp_mount",            rtsp_mount},
         {"ai_model_path",         ai_model_path},
         {"ai_labels",             ai_labels},
         {"soullink_sync_root",    soullink_sync_root},
         {"model2_path",           model2_path},
+        {"rive_file",             rive_file},
+        {"rive_target",           rive_target},
     };
 }
 

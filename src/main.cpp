@@ -51,6 +51,7 @@
 #include "ai/model_pipeline.h"         // Multi-model pipeline info
 #include "ai/hand_target_tracker.h"    // Single-target hand tracking policy
 #include "pipeline/overlay.h"          // overlay_update()
+#include "pipeline/rive_renderer.h"    // Rive GPU renderer
 #include "pipeline/onvif_metadata.h"   // ONVIF metadata stream
 #include "pipeline/onvif_device.h"     // ONVIF device service (WS-Discovery + SOAP)
 #include "pipeline/snapshot.h"         // JPEG snapshot endpoint
@@ -384,27 +385,30 @@ static sc::Config parse_args(int argc, char** argv) {
     };
 
     int opt;
+    namespace DP = sc::SoulCamDp;
+    auto& ov = cfg.cli_overrides;
+
     while ((opt = getopt_long(argc, argv, "vhf:b:p:m:", long_opts, nullptr)) != -1) {
         switch (opt) {
-            case 'W': cfg.stream.width       = atoi(optarg); break;
-            case 'H': cfg.stream.height      = atoi(optarg); break;
-            case 'f': cfg.stream.fps         = atoi(optarg); break;
-            case 'b': cfg.rtsp.bitrate_kbps  = atoi(optarg); break;
-            case 'p': cfg.rtsp.port          = atoi(optarg); break;
-            case 'm': cfg.rtsp.mount         = optarg;       break;
+            case 'W': cfg.stream.width       = atoi(optarg); ov.insert(DP::stream_width);     break;
+            case 'H': cfg.stream.height      = atoi(optarg); ov.insert(DP::stream_height);    break;
+            case 'f': cfg.stream.fps         = atoi(optarg); ov.insert(DP::stream_fps);       break;
+            case 'b': cfg.rtsp.bitrate_kbps  = atoi(optarg); ov.insert(DP::rtsp_bitrate);     break;
+            case 'p': cfg.rtsp.port          = atoi(optarg); ov.insert(DP::rtsp_port);        break;
+            case 'm': cfg.rtsp.mount         = optarg;       ov.insert(DP::rtsp_mount);       break;
             case 'S': cfg.sensor.width       = atoi(optarg); break;
             case 'T': cfg.sensor.height      = atoi(optarg); break;
-            case 'A': cfg.enable_ai          = true;         break;
-            case 'O': cfg.enable_overlay    = true;         break;
-            case 'N': cfg.enable_onvif     = true; cfg.enable_onvif_device = true; break;
+            case 'A': cfg.enable_ai          = true;         ov.insert(DP::enable_ai);        break;
+            case 'O': cfg.enable_overlay    = true;          ov.insert(DP::enable_overlay);   break;
+            case 'N': cfg.enable_onvif     = true; cfg.enable_onvif_device = true; ov.insert(DP::enable_onvif); break;
             case 'R': cfg.onvif_port       = atoi(optarg);  break;
             case 'J': cfg.enable_snapshot   = true;         break;
             case 'K': cfg.snapshot_port     = atoi(optarg);  break;
-            case 'M': cfg.rknn.model_path    = optarg;       break;
+            case 'M': cfg.rknn.model_path    = optarg;       ov.insert(DP::ai_model_path);    break;
             case 20:  cfg.primary_model_weight = atoi(optarg); break;
-            case 'c': cfg.rknn.conf_threshold = atof(optarg); break;
+            case 'c': cfg.rknn.conf_threshold = atof(optarg); ov.insert(DP::ai_conf_threshold); break;
             case 'n': cfg.rknn.nms_threshold  = atof(optarg); break;
-            case 'L': cfg.rknn.labels         = optarg;       break;
+            case 'L': cfg.rknn.labels         = optarg;       ov.insert(DP::ai_labels);        break;
             case 16:  cfg.hand_fast_switch    = true;         break;
             case 17:  cfg.hand_fast_growth    = static_cast<float>(atof(optarg)); break;
             case 18:  cfg.hand_fast_area_ratio = static_cast<float>(atof(optarg)); break;
@@ -415,8 +419,8 @@ static sc::Config parse_args(int argc, char** argv) {
             case 4:   cfg.scene_sock         = optarg;       break;
             case 5:   cfg.ctrl_sock          = optarg;       break;
             // Soullink module
-            case 40:  cfg.soullink.enable = true;            break;
-            case 41:  cfg.soullink.enable = false;           break;
+            case 40:  cfg.soullink.enable = true;  ov.insert(DP::enable_soullink); break;
+            case 41:  cfg.soullink.enable = false; ov.insert(DP::enable_soullink); break;
             case 42:  cfg.soullink.service_identifier = optarg; break;
             case 43:  cfg.soullink.mdns_service_type = optarg; break;
             case 44:  cfg.soullink.mqtt_host = optarg;       break;
@@ -425,28 +429,28 @@ static sc::Config parse_args(int argc, char** argv) {
             case 47:  cfg.soullink.mqtt_username = optarg;   break;
             case 48:  cfg.soullink.mqtt_password = optarg;   break;
             case 56:  cfg.soullink.mdns_refresh_sec = atoi(optarg); break;
-            case 52:  cfg.soullink.sync_root = optarg;       break;
+            case 52:  cfg.soullink.sync_root = optarg; ov.insert(DP::soullink_sync_root); break;
             case 53:  cfg.soullink.sync_state_path = optarg; break;
             case 54:  cfg.soullink.use_composite_client_id = false; break;
             case 55:  cfg.soullink.use_composite_client_id = true;  break;
             // Multi-model
-            case 10:  model2_path = optarg;                  break;
+            case 10:  model2_path = optarg;                  ov.insert(DP::model2_path);      break;
             case 11:  model2_skip = atoi(optarg);            break;
-            case 12:  model2_conf = static_cast<float>(atof(optarg)); break;
+            case 12:  model2_conf = static_cast<float>(atof(optarg)); ov.insert(DP::model2_conf); break;
             case 21:  model2_weight = atoi(optarg);          break;
             case 13:  model3_path = optarg;                  break;
             case 14:  model3_skip = atoi(optarg);            break;
             case 15:  model3_conf = static_cast<float>(atof(optarg)); break;
             case 22:  model3_weight = atoi(optarg);          break;
-            case 23:  cfg.weighted_scheduler = true;         break;
-            case 24:  cfg.max_models_per_frame = atoi(optarg); break;
-            case 25:  cfg.test_adaptive_hand_person = true; break;
+            case 23:  cfg.weighted_scheduler = true;         ov.insert(DP::weighted_scheduler);    break;
+            case 24:  cfg.max_models_per_frame = atoi(optarg); ov.insert(DP::max_models_per_frame); break;
+            case 25:  cfg.test_adaptive_hand_person = true;  ov.insert(DP::adaptive_tracking);    break;
             case 26:  cfg.test_hand_slot = atoi(optarg); break;
             case 27:  cfg.test_person_slot = atoi(optarg); break;
             case 28:  cfg.test_weight_high = atoi(optarg); break;
             case 29:  cfg.test_weight_low = atoi(optarg); break;
             case 30:  cfg.test_no_hand_frames_to_fallback = atoi(optarg); break;
-            case 'v': cfg.verbose            = true;         break;
+            case 'v': cfg.verbose            = true;         ov.insert(DP::verbose);           break;
             case 'h': print_usage(argv[0]); exit(0);
             default:  print_usage(argv[0]); exit(1);
         }
@@ -519,6 +523,11 @@ static void scene_hub_close() {
 }
 
 // ---------------------------------------------------------------------------
+// Rive renderer (GPU thread)
+// ---------------------------------------------------------------------------
+static sc::RiveRenderer g_rive_renderer;
+
+// ---------------------------------------------------------------------------
 // ONVIF metadata stream
 // ---------------------------------------------------------------------------
 static sc::OnvifStream* g_onvif = nullptr;
@@ -582,6 +591,9 @@ static void on_detections(const std::vector<sc::Detection>& dets,
 
     // Update shared overlay state (thread-safe)
     sc::overlay_update(out, frame_w, frame_h);
+
+    // Feed Rive renderer (thread-safe, zero-copy into shared buffer)
+    g_rive_renderer.updateDetections(out, frame_w, frame_h);
 
     // Push to ONVIF metadata stream
     if (g_onvif) {
@@ -978,29 +990,32 @@ static void process_soullink_sys_cmd(
 static void config_to_store(const sc::Config& cfg) {
     using namespace sc::SoulCamDp;
     auto& s = sc::Store::instance();
+    const auto& ov = cfg.cli_overrides;
 
-    s.set(stream_width,        (uint32_t)cfg.stream.width);
-    s.set(stream_height,       (uint32_t)cfg.stream.height);
-    s.set(stream_fps,          (uint32_t)cfg.stream.fps);
-    s.set(rtsp_bitrate,        (uint32_t)cfg.rtsp.bitrate_kbps);
-    s.set(rtsp_port,           (uint32_t)cfg.rtsp.port);
-    s.set(rtsp_mount,          std::string(cfg.rtsp.mount));
-    s.set(enable_ai,           cfg.enable_ai);
-    s.set(enable_overlay,      cfg.enable_overlay);
-    s.set(ai_conf_threshold,   cfg.rknn.conf_threshold);
-    s.set(ai_model_path,       std::string(cfg.rknn.model_path));
-    s.set(ai_labels,           std::string(cfg.rknn.labels));
-    s.set(enable_soullink,     cfg.soullink.enable);
-    s.set(enable_onvif,        cfg.enable_onvif);
-    s.set(verbose,             cfg.verbose);
-    s.set(adaptive_tracking,   cfg.test_adaptive_hand_person);
-    s.set(weighted_scheduler,  cfg.weighted_scheduler);
-    s.set(max_models_per_frame,(uint32_t)cfg.max_models_per_frame);
-    s.set(soullink_sync_root,  std::string(cfg.soullink.sync_root));
-    if (!cfg.extra_models.empty()) {
+    auto has = [&](int dp) { return ov.count(dp) > 0; };
+
+    if (has(stream_width))        s.set(stream_width,        (uint32_t)cfg.stream.width);
+    if (has(stream_height))       s.set(stream_height,       (uint32_t)cfg.stream.height);
+    if (has(stream_fps))          s.set(stream_fps,          (uint32_t)cfg.stream.fps);
+    if (has(rtsp_bitrate))        s.set(rtsp_bitrate,        (uint32_t)cfg.rtsp.bitrate_kbps);
+    if (has(rtsp_port))           s.set(rtsp_port,           (uint32_t)cfg.rtsp.port);
+    if (has(rtsp_mount))          s.set(rtsp_mount,          std::string(cfg.rtsp.mount));
+    if (has(enable_ai))           s.set(enable_ai,           cfg.enable_ai);
+    if (has(enable_overlay))      s.set(enable_overlay,      cfg.enable_overlay);
+    if (has(ai_conf_threshold))   s.set(ai_conf_threshold,   cfg.rknn.conf_threshold);
+    if (has(ai_model_path))       s.set(ai_model_path,       std::string(cfg.rknn.model_path));
+    if (has(ai_labels))           s.set(ai_labels,           std::string(cfg.rknn.labels));
+    if (has(enable_soullink))     s.set(enable_soullink,     cfg.soullink.enable);
+    if (has(enable_onvif))        s.set(enable_onvif,        cfg.enable_onvif);
+    if (has(verbose))             s.set(verbose,             cfg.verbose);
+    if (has(adaptive_tracking))   s.set(adaptive_tracking,   cfg.test_adaptive_hand_person);
+    if (has(weighted_scheduler))  s.set(weighted_scheduler,  cfg.weighted_scheduler);
+    if (has(max_models_per_frame))s.set(max_models_per_frame,(uint32_t)cfg.max_models_per_frame);
+    if (has(soullink_sync_root))  s.set(soullink_sync_root,  std::string(cfg.soullink.sync_root));
+    if (has(model2_path) && !cfg.extra_models.empty())
         s.set(model2_path, std::string(cfg.extra_models[0].rknn.model_path));
+    if (has(model2_conf) && !cfg.extra_models.empty())
         s.set(model2_conf, cfg.extra_models[0].rknn.conf_threshold);
-    }
 }
 
 static void store_to_config(sc::Config& cfg) {
@@ -1054,8 +1069,9 @@ int main(int argc, char** argv) {
     // 2. Initialize Store: defaults -> load persisted -> overlay CLI values
     sc::Store::instance().initialize();
     sc::Store::instance().load();
-    config_to_store(cfg);         // CLI overrides take priority
-    sc::Store::instance().save(); // persist the merged state
+    config_to_store(cfg);         // only explicit CLI args override persisted values
+    if (!cfg.cli_overrides.empty())
+        sc::Store::instance().save();
     store_to_config(cfg);         // ensure Config is in sync
     g_enable_hand_tracker = should_enable_hand_target_tracker(cfg);
     g_hand_tracker.set_config(make_hand_tracker_config(cfg), true);
@@ -1101,6 +1117,14 @@ int main(int argc, char** argv) {
         plugin_path = plugin_path + ":" + existing_pp;
     }
     g_setenv("GST_PLUGIN_PATH", plugin_path.c_str(), TRUE);
+
+    // Suppress noisy GStreamer/RGA debug unless verbose.
+    // RGA plugin uses raw printf (bypasses GST_DEBUG), so we redirect stderr
+    // to /dev/null and route SoulCam logs through a saved fd.
+    if (!cfg.verbose) {
+        sc::log_redirect_stderr_quiet();
+        g_setenv("GST_DEBUG", "0", TRUE);
+    }
 
     // --- Initialize GStreamer ---
     gst_init(&argc, &argv);
@@ -1149,6 +1173,51 @@ int main(int argc, char** argv) {
             if (g_adaptive_test_cfg.enabled) {
                 apply_adaptive_test_weights_if_needed(AdaptiveTestMode::Neutral);
             }
+        }
+    }
+
+    // --- Rive renderer (optional, GPU thread) ---
+    {
+        using namespace sc::SoulCamDp;
+        auto& store = sc::Store::instance();
+        bool rive_enabled = store.get<bool>(enable_rive);
+        std::string riv_path = store.get<std::string>(rive_file);
+        uint32_t rive_res = store.get<uint32_t>(rive_resolution);
+        std::string rive_tgt = store.get<std::string>(rive_target);
+
+        sc::RiveRendererConfig rcfg;
+        rcfg.riv_file = riv_path;
+        rcfg.resolution = rive_res > 0 ? rive_res : 500;
+        rcfg.target_label = rive_tgt.empty() ? "person" : rive_tgt;
+        rcfg.enabled = rive_enabled && !riv_path.empty();
+
+        g_rive_renderer.start(rcfg);
+
+        // DP change listener for runtime Rive config
+        store.addChangeListener([](int key, const sc::StateType&, const sc::StateType&) {
+            using namespace sc::SoulCamDp;
+            auto& s = sc::Store::instance();
+            switch (key) {
+                case enable_rive:
+                    g_rive_renderer.setEnabled(s.get<bool>(enable_rive));
+                    break;
+                case rive_resolution:
+                    g_rive_renderer.setResolution(s.get<uint32_t>(rive_resolution));
+                    break;
+                case rive_file:
+                    g_rive_renderer.setRivFile(s.get<std::string>(rive_file));
+                    break;
+                case rive_target:
+                    g_rive_renderer.setTargetLabel(s.get<std::string>(rive_target));
+                    break;
+            }
+        });
+
+        if (rive_enabled && !riv_path.empty()) {
+            SC_LOG_INFO("Rive renderer: started (file=%s, res=%u, target=%s)",
+                        riv_path.c_str(), rive_res, rive_tgt.c_str());
+        } else {
+            SC_LOG_INFO("Rive renderer: standby (set enable_rive=true and rive_file via DP)");
         }
     }
 
@@ -1239,6 +1308,7 @@ int main(int argc, char** argv) {
     if (g_ctrl_fd >= 0) {
         SC_LOG_INFO("  Control: %s (model hot-swap, status)", cfg.ctrl_sock.c_str());
     }
+    SC_LOG_INFO("  Rive renderer: %s", g_rive_renderer.running() ? "running (GPU thread)" : "standby");
     SC_LOG_INFO("  Soullink: %s", soullink ? "enabled (native C++ module)" : "disabled");
     SC_LOG_INFO("  Press Ctrl+C to stop");
     fprintf(stderr, "\n");
@@ -1258,6 +1328,7 @@ int main(int argc, char** argv) {
 
     // --- Cleanup ---
     SC_LOG_INFO("Shutting down...");
+    g_rive_renderer.stop();
     if (soullink) soullink->stop();
     ctrl_close();
     sc::snapshot_server_stop(snap_srv);
