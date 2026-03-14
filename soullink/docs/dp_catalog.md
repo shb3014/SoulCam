@@ -18,7 +18,7 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 3 | `stream_fps` | u32 | 30 | V4L2 capture framerate. Also derives RTSP GOP (1 keyframe/sec). |
 | 4 | `rtsp_bitrate` | u32 | 4000 | H.264 target bitrate in kbps. |
 | 5 | `rtsp_port` | u32 | 8554 | TCP port the RTSP server listens on. |
-| 6 | `enable_ai` | bool | false | Master switch for AI inference pipeline (selfpath + RKNN). |
+| 6 | `enable_ai` | bool | true | Master switch for AI inference pipeline (selfpath + RKNN). |
 | 7 | `enable_overlay` | bool | false | Draw bounding-box overlays on RTSP stream (requires AI). |
 | 8 | `ai_conf_threshold` | float | 0.25 | Minimum detection confidence score for primary model. |
 | 9 | `enable_soullink` | bool | true | Start the SoulLink module (mDNS + MQTT + SoulCmd). |
@@ -67,6 +67,7 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 
 | subcmd | Name | data format | Description |
 |-------:|------|-------------|-------------|
+| 1 | Restart | `1` or `{"subcmd":1}` | Restart the soulcam systemd service. Responds before restarting. |
 | 6 | DP info | `6` (number) | Returns full DP metadata list (`id=2`, `dpList`) on `m/` topic. |
 | 7 | Model swap | `{"subcmd":7, "slot":0, "path":"...", "conf":0.3}` | Hot-swap a model in a running slot. |
 | 8 | Model add | `{"subcmd":8, "path":"...", "conf":0.3, "skip":0, "weight":1}` | Add a new model slot at runtime. |
@@ -91,8 +92,8 @@ Model list (subcmd 11) returns slot details in `message.data`.
 
 1. `Store::initialize()` — allocate cache with defaults
 2. `Store::load()` — read `/var/lib/soulcam/store.json`
-3. `config_to_store()` — CLI args override loaded values
-4. `Store::save()` — persist merged state
+3. `config_to_store()` — only explicit CLI args override persisted values
+4. `Store::save()` — persist if CLI overrides were applied
 5. `store_to_config()` — rebuild `sc::Config` from Store for pipeline init
 
 ### Runtime via SoulFlow
@@ -110,7 +111,7 @@ Model list (subcmd 11) returns slot details in `message.data`.
 2. setDp: model2_conf = 0.10
 3. setDp: adaptive_tracking = true
 4. setDp: max_models_per_frame = 1
-5. Restart soulcam (DPs persist)
+5. sysCmd: 1   (restart to apply)
 ```
 
 Or for immediate model swap:

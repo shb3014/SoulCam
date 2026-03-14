@@ -10,9 +10,11 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <sys/socket.h>
+#include <thread>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -560,6 +562,7 @@ void Module::handle_sync_files(const JsonValue& data) {
     publish_sync_result(result.ok, result.message);
 }
 
+constexpr int kSysCmdRestart       = 1;
 constexpr int kSysCmdRequestDpInfo = 6;
 constexpr int kSysCmdModelSwap    = 7;
 constexpr int kSysCmdModelAdd     = 8;
@@ -577,6 +580,16 @@ void Module::handle_sys_cmd(const JsonValue& data) {
     }
 
     switch (subcmd) {
+        case kSysCmdRestart: {
+            SC_LOG_INFO("sysCmd: restart requested via SoulLink");
+            respondSysCmd(true, "restarting soulcam service...");
+            std::thread([] {
+                usleep(500000);
+                SC_LOG_INFO("Restarting now...");
+                _exit(1);
+            }).detach();
+            break;
+        }
         case kSysCmdRequestDpInfo:
             publish_dp_info();
             break;
