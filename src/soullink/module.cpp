@@ -569,6 +569,7 @@ constexpr int kSysCmdModelAdd     = 8;
 constexpr int kSysCmdModelRemove  = 9;
 constexpr int kSysCmdModelEnable  = 10;
 constexpr int kSysCmdModelList    = 11;
+constexpr int kSysCmdRequestRtspInfo = 12;
 
 void Module::handle_sys_cmd(const JsonValue& data) {
     int subcmd = -1;
@@ -592,6 +593,9 @@ void Module::handle_sys_cmd(const JsonValue& data) {
         }
         case kSysCmdRequestDpInfo:
             publish_dp_info();
+            break;
+        case kSysCmdRequestRtspInfo:
+            publish_rtsp_info();
             break;
         case kSysCmdModelSwap:
         case kSysCmdModelAdd:
@@ -660,6 +664,27 @@ void Module::publish_dp_info() {
     publish_json(topic_msg_, JsonValue(std::move(payload)));
 
     SC_LOG_INFO("Soullink published DP info (%d entries)", count);
+}
+
+void Module::publish_rtsp_info() {
+    const std::string host = sl_cfg_.rtsp_host_override.empty() ? local_ip_ : sl_cfg_.rtsp_host_override;
+    const std::string rtsp_url = "rtsp://" + host + ":" + std::to_string(cfg_.rtsp.port) + cfg_.rtsp.mount;
+    const bool rtsp_ok = check_rtsp_reachable();
+    const bool ready = rtsp_ok && frame_receiver_started_;
+
+    JsonValue::Object message;
+    message["url"] = JsonValue(rtsp_url);
+    message["host"] = JsonValue(host);
+    message["port"] = JsonValue(static_cast<int64_t>(cfg_.rtsp.port));
+    message["mount"] = JsonValue(cfg_.rtsp.mount);
+    message["online"] = JsonValue(rtsp_ok);
+    message["streamSubscribed"] = JsonValue(stream_subscribed_.load());
+    message["moduleReady"] = JsonValue(ready);
+
+    JsonValue::Object payload;
+    payload["id"] = JsonValue(static_cast<int64_t>(3));
+    payload["message"] = JsonValue(std::move(message));
+    publish_json(topic_msg_, JsonValue(std::move(payload)));
 }
 
 void Module::publish_unsupported(const JsonValue& cmd_value) {

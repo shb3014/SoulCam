@@ -67,6 +67,7 @@ private:
     void handle_sync_files(const JsonValue& data);
     void handle_sys_cmd(const JsonValue& data);
     void publish_dp_info();
+    void publish_rtsp_info();
     void publish_unsupported(const JsonValue& cmd_value);
 
     bool publish_json(const std::string& topic, const JsonValue& payload);

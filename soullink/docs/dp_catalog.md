@@ -69,6 +69,7 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 |-------:|------|-------------|-------------|
 | 1 | Restart | `1` or `{"subcmd":1}` | Restart the soulcam systemd service. Responds before restarting. |
 | 6 | DP info | `6` (number) | Returns full DP metadata list (`id=2`, `dpList`) on `m/` topic. |
+| 12 | RTSP info | `12` (number) | Returns RTSP endpoint/health snapshot (`id=3`) on `m/` topic. |
 | 7 | Model swap | `{"subcmd":7, "slot":0, "path":"...", "conf":0.3}` | Hot-swap a model in a running slot. |
 | 8 | Model add | `{"subcmd":8, "path":"...", "conf":0.3, "skip":0, "weight":1}` | Add a new model slot at runtime. |
 | 9 | Model remove | `{"subcmd":9, "slot":1}` | Remove a model slot (slot > 0 only). |
@@ -83,6 +84,23 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 
 Responses are published on the `m/` topic as notifications (`id=0`).
 Model list (subcmd 11) returns slot details in `message.data`.
+
+RTSP info (subcmd 12) returns:
+
+```json
+{
+  "id": 3,
+  "message": {
+    "url": "rtsp://192.168.1.45:8554/cam",
+    "host": "192.168.1.45",
+    "port": 8554,
+    "mount": "/cam",
+    "online": true,
+    "streamSubscribed": false,
+    "moduleReady": true
+  }
+}
+```
 
 ---
 
