@@ -13,6 +13,9 @@ Group=ubuntu
 Environment=GST_PLUGIN_PATH=/usr/local/lib/aarch64-linux-gnu/gstreamer-1.0
 # Suppress GStreamer debug noise
 Environment=GST_DEBUG=1
+# Mesa PLS driver (required for Rive Renderer / Panfrost PLS rendering)
+Environment=LD_LIBRARY_PATH=/opt/mesa-pls/lib/aarch64-linux-gnu
+Environment=LIBGL_DRIVERS_PATH=/opt/mesa-pls/lib/aarch64-linux-gnu/dri
 
 # Working directory
 WorkingDirectory=/home/ubuntu/SoulCam
@@ -36,7 +39,7 @@ ExecStart=/home/ubuntu/SoulCam/build/soulcam --snapshot
 #ExecStart=/home/ubuntu/SoulCam/build/soulcam --onvif-device --snapshot
 
 # Graceful shutdown
-ExecStop=/bin/kill -TERM $MAINPID
+# Rely on systemd default stop behavior (SIGTERM to main process).
 TimeoutStopSec=5
 
 # Restart on failure (but not on clean exit)

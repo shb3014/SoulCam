@@ -133,7 +133,8 @@ static void on_need_data(GstAppSrc* src, guint /*length*/, gpointer user_data) {
     }
 
     if (xml.empty()) {
-        // Heartbeat: push an empty metadata frame to keep stream alive
+        // Heartbeat: push an empty metadata frame to keep stream alive.
+        // Keep cadence high so consumers can align metadata to video cadence.
         xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
               "<tt:MetadataStream xmlns:tt=\"http://www.onvif.org/ver10/schema\">\n"
               "  <tt:VideoAnalytics>\n"
@@ -148,11 +149,12 @@ static void on_need_data(GstAppSrc* src, guint /*length*/, gpointer user_data) {
     memcpy(map.data, xml.c_str(), xml.size());
     gst_buffer_unmap(buf, &map);
 
-    // Timestamp the buffer (1 second intervals)
+    // Timestamp the buffer (~30fps cadence) so metadata can track video timing.
     static guint64 ts = 0;
+    static constexpr guint64 kMetaFrameDuration = GST_SECOND / 30;
     GST_BUFFER_PTS(buf) = ts;
-    GST_BUFFER_DURATION(buf) = GST_SECOND;
-    ts += GST_SECOND;
+    GST_BUFFER_DURATION(buf) = kMetaFrameDuration;
+    ts += kMetaFrameDuration;
 
     gst_app_src_push_buffer(src, buf);
 }

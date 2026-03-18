@@ -119,6 +119,12 @@ struct TrackerState {
     std::vector<Detection> dets;
     int detW = 640, detH = 480;
     bool hasFresh = false;
+
+    // Sticky target: persist lock-on across frames via IOU overlap.
+    Detection stickyTarget{};
+    bool hasStickyTarget = false;
+    int stickyMissFrames = 0;
+    static constexpr int kStickyMaxMiss = 8;
 };
 
 // ---------------------------------------------------------------------------
@@ -277,26 +283,108 @@ static void detectControlMode(TrackerState& ts) {
 // ---------------------------------------------------------------------------
 
 static void estimateTrackingPoint(const Detection& det, const std::string& targetLabel,
-                                  float& cx, float& cy) {
-    cx = 640.0f - (det.left + det.right) / 2.0f;
+                                  int detW, int detH, float& cx, float& cy) {
+    const float frameW = static_cast<float>(std::max(1, detW));
+    const float frameH = static_cast<float>(std::max(1, detH));
+    cx = frameW - (det.left + det.right) / 2.0f;
     if (targetLabel == "person") {
         float h = static_cast<float>(det.bottom - det.top);
         cy = det.top + h * 0.12f;
     } else {
         cy = (det.top + det.bottom) / 2.0f;
     }
+    cx = std::clamp(cx, 0.0f, frameW);
+    cy = std::clamp(cy, 0.0f, frameH);
 }
 
-static const Detection* findBestTarget(const std::vector<Detection>& dets,
-                                       const std::string& label) {
-    const Detection* best = nullptr;
-    float bestConf = 0;
-    for (const auto& d : dets) {
-        if (d.label && std::string(d.label) == label && d.confidence > 0.3f &&
-            d.confidence > bestConf) {
-            best = &d;
-            bestConf = d.confidence;
+static float det_iou(const Detection& a, const Detection& b) {
+    const float x1 = static_cast<float>(std::max(a.left, b.left));
+    const float y1 = static_cast<float>(std::max(a.top, b.top));
+    const float x2 = static_cast<float>(std::min(a.right, b.right));
+    const float y2 = static_cast<float>(std::min(a.bottom, b.bottom));
+    if (x2 <= x1 || y2 <= y1) return 0.0f;
+    const float inter = (x2 - x1) * (y2 - y1);
+    const float areaA = static_cast<float>((a.right - a.left) * (a.bottom - a.top));
+    const float areaB = static_cast<float>((b.right - b.left) * (b.bottom - b.top));
+    const float uni = areaA + areaB - inter;
+    return uni > 0.0f ? inter / uni : 0.0f;
+}
+
+static const Detection* findStickyTarget(TrackerState& ts,
+                                         const std::vector<Detection>& dets,
+                                         const std::string& label) {
+    auto collect = [&](const std::string& wanted) {
+        std::vector<const Detection*> out;
+        for (const auto& d : dets) {
+            if (d.label && std::string(d.label) == wanted && d.confidence > 0.3f)
+                out.push_back(&d);
         }
+        return out;
+    };
+
+    auto candidates = collect(label);
+    if (candidates.empty() && label == "person")
+        candidates = collect("hand");
+    if (candidates.empty()) {
+        for (const auto& d : dets)
+            if (d.confidence > 0.3f) candidates.push_back(&d);
+    }
+    if (candidates.empty()) {
+        ts.stickyMissFrames++;
+        if (ts.stickyMissFrames > TrackerState::kStickyMaxMiss)
+            ts.hasStickyTarget = false;
+        return nullptr;
+    }
+
+    if (ts.hasStickyTarget) {
+        const Detection* best_match = nullptr;
+        float best_iou = 0.15f;
+        for (const auto* c : candidates) {
+            float iou = det_iou(ts.stickyTarget, *c);
+            if (iou > best_iou) { best_iou = iou; best_match = c; }
+        }
+        if (best_match) {
+            float cur_area = static_cast<float>(
+                (best_match->right - best_match->left) *
+                (best_match->bottom - best_match->top));
+
+            // Switch to a challenger if it is much closer (larger area).
+            constexpr float kSwitchAreaRatio = 1.8f;
+            const Detection* challenger = nullptr;
+            float challenger_area = 0.0f;
+            for (const auto* c : candidates) {
+                if (c == best_match) continue;
+                float a = static_cast<float>(
+                    (c->right - c->left) * (c->bottom - c->top));
+                if (a > challenger_area) { challenger_area = a; challenger = c; }
+            }
+            if (challenger && cur_area > 0.0f &&
+                challenger_area / cur_area >= kSwitchAreaRatio) {
+                ts.stickyTarget = *challenger;
+                ts.stickyMissFrames = 0;
+                return challenger;
+            }
+
+            ts.stickyTarget = *best_match;
+            ts.stickyMissFrames = 0;
+            return best_match;
+        }
+        ts.stickyMissFrames++;
+        if (ts.stickyMissFrames <= TrackerState::kStickyMaxMiss)
+            return nullptr;
+    }
+
+    const Detection* best = nullptr;
+    float bestScore = -1.0f;
+    for (const auto* c : candidates) {
+        float area = static_cast<float>((c->right - c->left) * (c->bottom - c->top));
+        float score = area + 0.15f * c->confidence * area;
+        if (score > bestScore) { bestScore = score; best = c; }
+    }
+    if (best) {
+        ts.stickyTarget = *best;
+        ts.hasStickyTarget = true;
+        ts.stickyMissFrames = 0;
     }
     return best;
 }
@@ -307,15 +395,17 @@ static const Detection* findBestTarget(const std::vector<Detection>& dets,
 
 static void updateJoystick(TrackerState& ts, float dt) {
     if (!ts.joystick) return;
+    const float frameW = static_cast<float>(std::max(1, ts.detW));
+    const float frameH = static_cast<float>(std::max(1, ts.detH));
 
     if (ts.hasFresh) {
         ts.hasFresh = false;
-        auto* p = findBestTarget(ts.dets, ts.targetLabel);
+        auto* p = findStickyTarget(ts, ts.dets, ts.targetLabel);
         if (p) {
             float cx, cy;
-            estimateTrackingPoint(*p, ts.targetLabel, cx, cy);
-            ts.targetX = std::clamp((cx / 640.0f) * 2.0f - 1.0f, -1.0f, 1.0f);
-            ts.targetY = std::clamp((cy / 640.0f) * 2.0f - 1.0f, -1.0f, 1.0f);
+            estimateTrackingPoint(*p, ts.targetLabel, ts.detW, ts.detH, cx, cy);
+            ts.targetX = std::clamp((cx / frameW) * 2.0f - 1.0f, -1.0f, 1.0f);
+            ts.targetY = std::clamp((cy / frameH) * 2.0f - 1.0f, -1.0f, 1.0f);
             ts.personVisible = true;
             ts.timeSinceLastPerson = 0.0f;
         } else {
@@ -345,14 +435,15 @@ static void updateJoystick(TrackerState& ts, float dt) {
 
 static void updateLookDir(TrackerState& ts) {
     if (!ts.lookDirInput || !ts.hasFresh) return;
+    const float frameW = static_cast<float>(std::max(1, ts.detW));
     ts.hasFresh = false;
 
-    auto* p = findBestTarget(ts.dets, ts.targetLabel);
+    auto* p = findStickyTarget(ts, ts.dets, ts.targetLabel);
     float newDir = 0.0f;
     if (p) {
         float cx, cy;
-        estimateTrackingPoint(*p, ts.targetLabel, cx, cy);
-        float normX = cx / 640.0f;
+        estimateTrackingPoint(*p, ts.targetLabel, ts.detW, ts.detH, cx, cy);
+        float normX = cx / frameW;
         if (normX < 0.33f) newDir = 1.0f;
         else if (normX > 0.66f) newDir = 2.0f;
         else newDir = 3.0f;
@@ -365,15 +456,17 @@ static void updateLookDir(TrackerState& ts) {
 
 static void updatePointerMove(TrackerState& ts, float dt) {
     bool wasVisible = ts.personVisible;
+    const float frameW = static_cast<float>(std::max(1, ts.detW));
+    const float frameH = static_cast<float>(std::max(1, ts.detH));
 
     if (ts.hasFresh) {
         ts.hasFresh = false;
-        auto* p = findBestTarget(ts.dets, ts.targetLabel);
+        auto* p = findStickyTarget(ts, ts.dets, ts.targetLabel);
         if (p) {
             float cx, cy;
-            estimateTrackingPoint(*p, ts.targetLabel, cx, cy);
-            ts.targetX = (cx / 640.0f) * ts.abWidth;
-            ts.targetY = (cy / 640.0f) * ts.abHeight;
+            estimateTrackingPoint(*p, ts.targetLabel, ts.detW, ts.detH, cx, cy);
+            ts.targetX = (cx / frameW) * ts.abWidth;
+            ts.targetY = (cy / frameH) * ts.abHeight;
             ts.personVisible = true;
             ts.timeSinceLastPerson = 0.0f;
         } else {
@@ -608,6 +701,7 @@ void RiveRenderer::renderThread() {
             if (m_pending.target_changed) {
                 ts.targetLabel = m_pending.target_label;
                 m_pending.target_changed = false;
+                ts.hasStickyTarget = false;
             }
             if (m_pending.resolution_changed) {
                 uint32_t newRes = m_pending.resolution;
@@ -681,6 +775,18 @@ void RiveRenderer::renderThread() {
                 ts.hasFresh = true;
                 m_shared.fresh = false;
             }
+        }
+
+        // Periodic diagnostic: confirm detections reach the Rive thread.
+        static int diagCounter = 0;
+        if (++diagCounter >= 300) {
+            diagCounter = 0;
+            const Detection* tgt = findStickyTarget(ts, ts.dets, ts.targetLabel);
+            SC_LOG_INFO("Rive diag: enabled=%d loaded=%d dets=%zu target=\"%s\" found=%s visible=%d",
+                        ts.enabled ? 1 : 0, riveLoaded ? 1 : 0,
+                        ts.dets.size(), ts.targetLabel.c_str(),
+                        tgt ? (tgt->label ? tgt->label : "?") : "none",
+                        ts.personVisible ? 1 : 0);
         }
 
         // Update tracking

@@ -102,6 +102,32 @@ RTSP info (subcmd 12) returns:
 }
 ```
 
+AI detections are now streamed as structured message packets:
+
+```json
+{
+  "id": 4,
+  "message": {
+    "schema": "soulcam.aiDetections.v1",
+    "tsMs": 1710400000000,
+    "frame": { "width": 640, "height": 480 },
+    "tracking": { "mode": "hand_target", "enabled": true },
+    "rawCount": 8,
+    "count": 1,
+    "objects": [
+      {
+        "model": 1,
+        "clsId": 0,
+        "label": "hand",
+        "conf": 0.934,
+        "box": { "left": 118, "top": 96, "right": 262, "bottom": 284 },
+        "center": { "x": 190, "y": 190 }
+      }
+    ]
+  }
+}
+```
+
 ---
 
 ## Configuration flow

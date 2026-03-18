@@ -33,6 +33,7 @@ constexpr int kCmdSoulReload = 14;
 constexpr int kCmdStreaming = 18;
 constexpr int kCmdDirectorPlay = 20;
 constexpr int kCmdSysCmd = 21;
+constexpr int kMsgAIDetections = 4;
 
 static std::string trim_copy(const std::string& s) {
     size_t begin = 0;
@@ -147,6 +148,7 @@ void Module::poll() {
         publish_health();
         last_health_publish_ = now;
     }
+    publish_ai_detections_if_due();
 }
 
 bool Module::init_identity() {
@@ -539,6 +541,10 @@ void Module::handle_unsub_stream(const JsonValue& data) {
     int stream_index = extract_stream_index(data, active_stream_index_);
     if (stream_index >= 0) active_stream_index_ = stream_index;
     bool was = stream_subscribed_.exchange(false);
+    {
+        std::lock_guard<std::mutex> lk(ai_detections_mu_);
+        has_pending_ai_detections_ = false;
+    }
     if (was) publish_stream_state(1, 0, stream_index);
 }
 
@@ -634,6 +640,66 @@ void Module::respondSysCmd(bool success, const std::string& message,
     publish_json(topic_msg_, JsonValue(std::move(payload)));
 }
 
+void Module::submitAIDetections(
+    const std::vector<sc::Detection>& detections,
+    int frame_width,
+    int frame_height,
+    const std::string& tracking_mode,
+    int raw_count) {
+    if (!running_) return;
+    if (!stream_subscribed_.load()) return;
+
+    JsonValue::Array rows;
+    rows.reserve(detections.size());
+    for (const auto& d : detections) {
+        JsonValue::Object box;
+        box["left"] = JsonValue(static_cast<int64_t>(d.left));
+        box["top"] = JsonValue(static_cast<int64_t>(d.top));
+        box["right"] = JsonValue(static_cast<int64_t>(d.right));
+        box["bottom"] = JsonValue(static_cast<int64_t>(d.bottom));
+
+        JsonValue::Object center;
+        center["x"] = JsonValue(static_cast<int64_t>((d.left + d.right) / 2));
+        center["y"] = JsonValue(static_cast<int64_t>((d.top + d.bottom) / 2));
+
+        JsonValue::Object obj;
+        obj["model"] = JsonValue(static_cast<int64_t>(d.model_id));
+        obj["clsId"] = JsonValue(static_cast<int64_t>(d.cls_id));
+        obj["label"] = JsonValue(d.label ? std::string(d.label) : std::string("?"));
+        obj["conf"] = JsonValue(static_cast<double>(d.confidence));
+        obj["box"] = JsonValue(std::move(box));
+        obj["center"] = JsonValue(std::move(center));
+        rows.emplace_back(JsonValue(std::move(obj)));
+    }
+
+    JsonValue::Object frame;
+    frame["width"] = JsonValue(static_cast<int64_t>(frame_width));
+    frame["height"] = JsonValue(static_cast<int64_t>(frame_height));
+
+    JsonValue::Object tracking;
+    tracking["mode"] = JsonValue(tracking_mode);
+    tracking["enabled"] = JsonValue(tracking_mode != "none");
+
+    JsonValue::Object message;
+    message["schema"] = JsonValue("soulcam.aiDetections.v1");
+    message["tsMs"] = JsonValue(static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()));
+    message["frame"] = JsonValue(std::move(frame));
+    message["tracking"] = JsonValue(std::move(tracking));
+    message["rawCount"] = JsonValue(static_cast<int64_t>(raw_count));
+    message["count"] = JsonValue(static_cast<int64_t>(detections.size()));
+    message["objects"] = JsonValue(std::move(rows));
+
+    JsonValue::Object payload;
+    payload["id"] = JsonValue(static_cast<int64_t>(kMsgAIDetections));
+    payload["message"] = JsonValue(std::move(message));
+
+    std::lock_guard<std::mutex> lk(ai_detections_mu_);
+    pending_ai_detections_payload_ = JsonValue(std::move(payload));
+    has_pending_ai_detections_ = true;
+}
+
 void Module::publish_dp_info() {
     JsonValue::Array dp_list;
 
@@ -685,6 +751,34 @@ void Module::publish_rtsp_info() {
     payload["id"] = JsonValue(static_cast<int64_t>(3));
     payload["message"] = JsonValue(std::move(message));
     publish_json(topic_msg_, JsonValue(std::move(payload)));
+}
+
+void Module::publish_ai_detections_if_due() {
+    if (!stream_subscribed_.load()) {
+        std::lock_guard<std::mutex> lk(ai_detections_mu_);
+        has_pending_ai_detections_ = false;
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (last_ai_detections_publish_.time_since_epoch().count() > 0) {
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_ai_detections_publish_).count();
+        if (elapsed_ms < 100) return;
+    }
+
+    JsonValue payload;
+    {
+        std::lock_guard<std::mutex> lk(ai_detections_mu_);
+        if (!has_pending_ai_detections_) return;
+        payload = pending_ai_detections_payload_;
+        has_pending_ai_detections_ = false;
+    }
+
+    if (publish_json(topic_msg_, payload)) {
+        last_ai_detections_publish_ = now;
+    }
 }
 
 void Module::publish_unsupported(const JsonValue& cmd_value) {

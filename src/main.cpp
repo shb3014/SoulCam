@@ -63,6 +63,7 @@
 
 #include <csignal>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <getopt.h>
@@ -160,6 +161,7 @@ static int g_adaptive_no_hand_frames = 0;
 static sc::AiCapture* g_ai_for_policy = nullptr;
 static sc::HandTargetTracker g_hand_policy_tracker(make_label_only_tracker_config("hand"));
 static sc::HandTargetTracker g_person_policy_tracker(make_label_only_tracker_config("person"));
+static std::atomic<sc::soullink::Module*> g_soullink_module{nullptr};
 
 static std::vector<sc::Detection> dets_for_slot(const std::vector<sc::Detection>& dets,
                                                 int slot_id) {
@@ -227,7 +229,7 @@ static void print_usage(const char* prog) {
         "  --sensor-height H  Sensor mode height  (default: 972)\n"
         "\n"
         "AI options:\n"
-        "  --ai               Enable AI pipeline on selfpath\n"
+        "  --ai               Legacy hint only; effective AI enable uses DP(enable_ai)\n"
         "  --overlay          Draw detection boxes on RTSP stream (requires --ai)\n"
         "  --onvif            Enable ONVIF (metadata stream + device service)\n"
         "  --onvif-port P     ONVIF HTTP port (default: 8080)\n"
@@ -398,7 +400,9 @@ static sc::Config parse_args(int argc, char** argv) {
             case 'm': cfg.rtsp.mount         = optarg;       ov.insert(DP::rtsp_mount);       break;
             case 'S': cfg.sensor.width       = atoi(optarg); break;
             case 'T': cfg.sensor.height      = atoi(optarg); break;
-            case 'A': cfg.enable_ai          = true;         ov.insert(DP::enable_ai);        break;
+            // Keep parsing --ai for backwards compatibility, but do not persist
+            // or force it over DP state. Effective value is loaded from Store/DP.
+            case 'A': cfg.enable_ai          = true;                                           break;
             case 'O': cfg.enable_overlay    = true;          ov.insert(DP::enable_overlay);   break;
             case 'N': cfg.enable_onvif     = true; cfg.enable_onvif_device = true; ov.insert(DP::enable_onvif); break;
             case 'R': cfg.onvif_port       = atoi(optarg);  break;
@@ -533,6 +537,58 @@ static sc::RiveRenderer g_rive_renderer;
 static sc::OnvifStream* g_onvif = nullptr;
 static sc::HandTargetTracker g_hand_tracker;
 static bool g_enable_hand_tracker = false;
+static std::atomic<int> g_rtsp_frame_w{1280};
+static std::atomic<int> g_rtsp_frame_h{960};
+
+static const char* current_tracking_mode() {
+    if (g_adaptive_test_cfg.enabled) {
+        if (g_adaptive_test_mode == AdaptiveTestMode::HandPreferred) return "adaptive_hand_preferred";
+        if (g_adaptive_test_mode == AdaptiveTestMode::PersonPreferred) return "adaptive_person_preferred";
+        return "adaptive_neutral";
+    }
+    if (g_enable_hand_tracker) return "hand_target";
+    return "none";
+}
+
+static const char* current_rive_target_label() {
+    if (g_adaptive_test_cfg.enabled) {
+        if (g_adaptive_test_mode == AdaptiveTestMode::HandPreferred) return "hand";
+        return "person";
+    }
+    if (g_enable_hand_tracker) return "hand";
+    return nullptr;
+}
+
+static std::vector<sc::Detection> project_detections_to_rtsp_frame(
+    const std::vector<sc::Detection>& dets,
+    int src_w,
+    int src_h,
+    int dst_w,
+    int dst_h) {
+    if (dets.empty()) return {};
+    if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return dets;
+    if (src_w == dst_w && src_h == dst_h) return dets;
+
+    auto project = [](int v, int in_size, int out_size) -> int {
+        if (in_size <= 0) return 0;
+        const double scale = static_cast<double>(out_size) / static_cast<double>(in_size);
+        return static_cast<int>(std::lround(static_cast<double>(v) * scale));
+    };
+
+    std::vector<sc::Detection> out;
+    out.reserve(dets.size());
+    for (const auto& d : dets) {
+        sc::Detection p = d;
+        p.left = std::clamp(project(d.left, src_w, dst_w), 0, dst_w);
+        p.right = std::clamp(project(d.right, src_w, dst_w), 0, dst_w);
+        p.top = std::clamp(project(d.top, src_h, dst_h), 0, dst_h);
+        p.bottom = std::clamp(project(d.bottom, src_h, dst_h), 0, dst_h);
+        if (p.right < p.left) std::swap(p.left, p.right);
+        if (p.bottom < p.top) std::swap(p.top, p.bottom);
+        out.push_back(p);
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // AI detection callback -- logs + publishes to scene hub + ONVIF
@@ -580,6 +636,19 @@ static void on_detections(const std::vector<sc::Detection>& dets,
     }
 
     const auto& out = *active;
+    const int rtsp_w = std::max(1, g_rtsp_frame_w.load(std::memory_order_acquire));
+    const int rtsp_h = std::max(1, g_rtsp_frame_h.load(std::memory_order_acquire));
+    const auto out_rtsp = project_detections_to_rtsp_frame(out, frame_w, frame_h, rtsp_w, rtsp_h);
+    auto* soullink = g_soullink_module.load(std::memory_order_acquire);
+    const bool stream_detections_enabled = !soullink || soullink->isStreamSubscribed();
+    if (soullink && stream_detections_enabled) {
+        soullink->submitAIDetections(
+            out_rtsp,
+            rtsp_w,
+            rtsp_h,
+            current_tracking_mode(),
+            static_cast<int>(dets.size()));
+    }
 
     SC_LOG_DEBUG("Detections: raw=%zu tracked=%zu in %dx%d",
                  dets.size(), out.size(), frame_w, frame_h);
@@ -592,12 +661,15 @@ static void on_detections(const std::vector<sc::Detection>& dets,
     // Update shared overlay state (thread-safe)
     sc::overlay_update(out, frame_w, frame_h);
 
-    // Feed Rive renderer (thread-safe, zero-copy into shared buffer)
-    g_rive_renderer.updateDetections(out, frame_w, frame_h);
+    // Feed Rive renderer with ALL raw detections so it can find its
+    // configured target ("person" by default via DP) regardless of which
+    // adaptive tracking policy is active for the stream output.
+    g_rive_renderer.updateDetections(dets, frame_w, frame_h);
 
-    // Push to ONVIF metadata stream
-    if (g_onvif) {
-        sc::onvif_stream_push(g_onvif, out, frame_w, frame_h);
+    // Push ONVIF metadata only while a stream subscriber is active.
+    // This keeps detection side-channel in sync with RTSP play/stop.
+    if (g_onvif && stream_detections_enabled) {
+        sc::onvif_stream_push(g_onvif, out_rtsp, rtsp_w, rtsp_h);
     }
 
     // Publish JSON to scene hub (extended format with model_id)
@@ -1073,6 +1145,8 @@ int main(int argc, char** argv) {
     if (!cfg.cli_overrides.empty())
         sc::Store::instance().save();
     store_to_config(cfg);         // ensure Config is in sync
+    g_rtsp_frame_w.store(std::max(1, cfg.stream.width), std::memory_order_release);
+    g_rtsp_frame_h.store(std::max(1, cfg.stream.height), std::memory_order_release);
     g_enable_hand_tracker = should_enable_hand_target_tracker(cfg);
     g_hand_tracker.set_config(make_hand_tracker_config(cfg), true);
     g_adaptive_test_cfg.enabled = cfg.test_adaptive_hand_person;
@@ -1091,6 +1165,10 @@ int main(int argc, char** argv) {
     }
 
     SC_LOG_INFO("SoulCam v%s starting", "0.2.0");
+    SC_LOG_INFO("DP toggles: enable_ai=%s, enable_overlay=%s, enable_onvif=%s",
+                cfg.enable_ai ? "true" : "false",
+                cfg.enable_overlay ? "true" : "false",
+                cfg.enable_onvif ? "true" : "false");
     SC_LOG_INFO("Hand target tracker: %s (labels=\"%s\")",
                 g_enable_hand_tracker ? "enabled" : "disabled",
                 cfg.rknn.labels.c_str());
@@ -1154,7 +1232,7 @@ int main(int argc, char** argv) {
     }
 
     if (cfg.enable_overlay && !cfg.enable_ai) {
-        SC_LOG_WARN("--overlay requires --ai; overlay disabled");
+        SC_LOG_WARN("overlay requested but DP enable_ai=false; overlay disabled");
     }
 
     // --- Start AI pipeline (optional) ---
@@ -1210,6 +1288,20 @@ int main(int argc, char** argv) {
                 case rive_target:
                     g_rive_renderer.setTargetLabel(s.get<std::string>(rive_target));
                     break;
+                case adaptive_tracking: {
+                    const bool enabled = s.get<bool>(adaptive_tracking);
+                    g_adaptive_test_cfg.enabled = enabled;
+                    g_adaptive_test_mode = AdaptiveTestMode::Neutral;
+                    g_adaptive_no_hand_frames = 0;
+                    g_hand_policy_tracker.reset();
+                    g_person_policy_tracker.reset();
+                    if (enabled) {
+                        apply_adaptive_test_weights_if_needed(AdaptiveTestMode::Neutral);
+                    }
+                    SC_LOG_INFO("Adaptive hand/person test policy changed via DP: %s",
+                                enabled ? "enabled" : "disabled");
+                    break;
+                }
             }
         });
 
@@ -1221,15 +1313,19 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --- ONVIF metadata stream (optional) ---
-    if (cfg.enable_onvif && cfg.enable_ai && ai) {
+    // --- ONVIF metadata stream (RTSP side-channel for AI data) ---
+    // Start metadata when AI is enabled and either:
+    //  - ONVIF flag is requested, or
+    //  - Soullink is enabled (for SoulFlow RTSP debug overlay sync).
+    const bool enable_rtsp_metadata = cfg.enable_ai && ai && (cfg.enable_onvif || cfg.soullink.enable);
+    if (enable_rtsp_metadata) {
         SC_LOG_INFO("Starting ONVIF metadata stream...");
         g_onvif = sc::onvif_stream_start(cfg);
         if (!g_onvif) {
             SC_LOG_WARN("ONVIF metadata stream failed to start -- detections still via scene hub");
         }
     } else if (cfg.enable_onvif && !cfg.enable_ai) {
-        SC_LOG_WARN("--onvif requires --ai; ONVIF metadata disabled");
+        SC_LOG_WARN("ONVIF requested but DP enable_ai=false; ONVIF metadata disabled");
     }
 
     // --- ONVIF device service (WS-Discovery + SOAP) ---
@@ -1262,6 +1358,7 @@ int main(int argc, char** argv) {
     if (cfg.soullink.enable) {
         soullink = std::make_unique<sc::soullink::Module>(cfg);
         soullink->start();
+        g_soullink_module.store(soullink.get(), std::memory_order_release);
     }
 
     // --- Print summary ---
@@ -1329,7 +1426,10 @@ int main(int argc, char** argv) {
     // --- Cleanup ---
     SC_LOG_INFO("Shutting down...");
     g_rive_renderer.stop();
-    if (soullink) soullink->stop();
+    if (soullink) {
+        g_soullink_module.store(nullptr, std::memory_order_release);
+        soullink->stop();
+    }
     ctrl_close();
     sc::snapshot_server_stop(snap_srv);
     sc::onvif_device_stop(onvif_dev);

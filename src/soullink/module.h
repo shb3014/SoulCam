@@ -35,6 +35,13 @@ public:
     bool popSysCmd(SysCmdRequest& out);
     void respondSysCmd(bool success, const std::string& message,
                        const JsonValue& data = JsonValue());
+    void submitAIDetections(
+        const std::vector<sc::Detection>& detections,
+        int frame_width,
+        int frame_height,
+        const std::string& tracking_mode,
+        int raw_count);
+    bool isStreamSubscribed() const { return stream_subscribed_.load(); }
 
 private:
     bool init_identity();
@@ -68,6 +75,7 @@ private:
     void handle_sys_cmd(const JsonValue& data);
     void publish_dp_info();
     void publish_rtsp_info();
+    void publish_ai_detections_if_due();
     void publish_unsupported(const JsonValue& cmd_value);
 
     bool publish_json(const std::string& topic, const JsonValue& payload);
@@ -130,6 +138,11 @@ private:
 
     std::mutex sys_cmd_mu_;
     std::queue<SysCmdRequest> pending_sys_cmds_;
+
+    std::mutex ai_detections_mu_;
+    JsonValue pending_ai_detections_payload_;
+    bool has_pending_ai_detections_ = false;
+    std::chrono::steady_clock::time_point last_ai_detections_publish_{};
 };
 
 }  // namespace sc::soullink
