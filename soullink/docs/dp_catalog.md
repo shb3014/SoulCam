@@ -30,6 +30,19 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 15 | `max_models_per_frame` | u32 | 1 | Max model slots to run per frame in weighted scheduler mode. |
 | 16 | `enable_rive` | bool | false | Enable GPU-rendered Rive animation on DRM/KMS display. |
 | 17 | `rive_resolution` | u32 | 500 | Rive render resolution in px (square). Lower = faster. |
+| 18 | `tracker_yolo_interval` | u32 | 1 | Run YOLO every N frames; lightweight tracker on others. 1 = tracker disabled. |
+| 19 | `tracker_enable_mosse` | bool | true | Enable KCF visual correlation (false = Kalman-only). |
+| 20 | `tracker_mosse_psr` | float | 7.0 | PSR threshold below which KCF falls back to Kalman. |
+| 21 | `tracker_mosse_learn_rate` | float | 0.125 | KCF filter adaptation rate (0..1). |
+| 22 | `tracker_mosse_patch_size` | u32 | 64 | KCF ROI size (power of 2, 16..256). |
+| 23 | `tracker_roi_padding` | float | 2.0 | Search region = bbox × this factor (≥1.0). |
+| 24 | `tracker_smooth_factor` | float | 0.6 | EMA smoothing alpha for YOLO re-anchor (0=none, 1=snap). |
+| 25 | `tracker_adaptive_interval` | bool | false | Enable adaptive YOLO scheduling (vs fixed interval). |
+| 26 | `tracker_max_skip` | u32 | 8 | Max consecutive tracker-only frames before forced YOLO. |
+| 27 | `tracker_min_skip` | u32 | 2 | Min frames between YOLO runs (even when urgent). |
+| 28 | `tracker_hand_confirm` | u32 | 3 | YOLO frames with hand detection to switch to HandPreferred. |
+| 29 | `tracker_hand_lost` | u32 | 5 | YOLO frames without hand to fallback to PersonFallback. |
+| 30 | `ai_target_fps` | u32 | 0 | AI pipeline target FPS. 0 = unlimited (process as fast as possible). >0 = drop frames to cap output rate. Takes effect immediately. |
 
 ## Persist DPs — String (offset 100+)
 
@@ -42,6 +55,7 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 105 | `model2_path` | string | `""` | Filesystem path to second RKNN model (slot 1). Empty = no model 2. |
 | 106 | `rive_file` | string | `""` | Filesystem path to .riv animation file. Empty = no animation. |
 | 107 | `rive_target` | string | `"person"` | Detection label to track (e.g. `"person"`, `"hand"`). |
+| 108 | `model2_labels` | string | `""` | Comma-separated class labels for model 2 (e.g. `"hand"`). |
 
 ## RAM DPs — Runtime only (not persisted)
 
@@ -51,7 +65,7 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 1002 | `stream_subscribed` | bool | false | SoulFlow has an active `subStream` subscription. |
 | 1003 | `module_ready` | bool | false | Composite: `rtsp_online && frame_receiver_started`. |
 
-**Total: 27 DPs** (17 numeric persist + 7 string persist + 3 RAM)
+**Total: 37 DPs** (26 numeric persist + 8 string persist + 3 RAM)
 
 ---
 
@@ -177,3 +191,21 @@ Or for immediate model swap:
 All four DPs persist and take effect immediately (no restart needed).
 The Rive renderer runs on a dedicated GPU thread (Mali-G52) and does not
 affect RTSP streaming or AI inference performance.
+
+### Example: enable interframe tracker from SoulFlow
+
+```
+1. setDp: tracker_yolo_interval = 4
+2. setDp: tracker_enable_mosse = true
+3. setDp: tracker_mosse_psr = 7.0
+4. setDp: tracker_smooth_factor = 0.6
+5. setDp: tracker_adaptive_interval = true
+6. setDp: tracker_max_skip = 8
+7. setDp: tracker_min_skip = 2
+```
+
+All tracker DPs take effect immediately (no restart needed).
+Setting `tracker_yolo_interval = 1` disables the tracker.
+When `tracker_adaptive_interval = true`, the scheduler dynamically decides
+when to run YOLO based on KCF PSR, velocity, and last YOLO confidence,
+bounded by `tracker_min_skip` and `tracker_max_skip`.

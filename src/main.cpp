@@ -61,6 +61,7 @@
 
 #include <gst/gst.h>
 
+#include <chrono>
 #include <csignal>
 #include <cctype>
 #include <cmath>
@@ -158,6 +159,10 @@ enum class AdaptiveTestMode {
 static AdaptiveHandPersonTestConfig g_adaptive_test_cfg{};
 static AdaptiveTestMode g_adaptive_test_mode = AdaptiveTestMode::Neutral;
 static int g_adaptive_no_hand_frames = 0;
+static int g_adaptive_hand_confirm_frames = 0;
+static std::chrono::steady_clock::time_point g_adaptive_last_switch{};
+static constexpr int ADAPTIVE_HAND_CONFIRM_THRESHOLD = 3;
+static constexpr std::chrono::milliseconds ADAPTIVE_MIN_HOLD_MS{2000};
 static sc::AiCapture* g_ai_for_policy = nullptr;
 static sc::HandTargetTracker g_hand_policy_tracker(make_label_only_tracker_config("hand"));
 static sc::HandTargetTracker g_person_policy_tracker(make_label_only_tracker_config("person"));
@@ -541,19 +546,19 @@ static std::atomic<int> g_rtsp_frame_w{1280};
 static std::atomic<int> g_rtsp_frame_h{960};
 
 static const char* current_tracking_mode() {
-    if (g_adaptive_test_cfg.enabled) {
-        if (g_adaptive_test_mode == AdaptiveTestMode::HandPreferred) return "adaptive_hand_preferred";
-        if (g_adaptive_test_mode == AdaptiveTestMode::PersonPreferred) return "adaptive_person_preferred";
-        return "adaptive_neutral";
+    if (sc::ai_capture_target_policy_enabled(g_ai_for_policy)) {
+        auto mode = sc::ai_capture_get_target_mode(g_ai_for_policy);
+        return (mode == sc::TargetMode::HandPreferred)
+            ? "target_hand" : "target_person";
     }
     if (g_enable_hand_tracker) return "hand_target";
     return "none";
 }
 
 static const char* current_rive_target_label() {
-    if (g_adaptive_test_cfg.enabled) {
-        if (g_adaptive_test_mode == AdaptiveTestMode::HandPreferred) return "hand";
-        return "person";
+    if (sc::ai_capture_target_policy_enabled(g_ai_for_policy)) {
+        auto mode = sc::ai_capture_get_target_mode(g_ai_for_policy);
+        return (mode == sc::TargetMode::HandPreferred) ? "hand" : "person";
     }
     if (g_enable_hand_tracker) return "hand";
     return nullptr;
@@ -599,35 +604,23 @@ static void on_detections(const std::vector<sc::Detection>& dets,
     std::vector<sc::Detection> tracked;
     const std::vector<sc::Detection>* active = &dets;
 
-    // Optional test policy:
-    // - when any hand appears -> prefer hand model weight and output hand target
-    // - when hand disappears for N frames -> prefer person model and output person target
-    if (g_adaptive_test_cfg.enabled) {
-        const std::vector<sc::Detection> hand_dets =
-            dets_for_slot(dets, g_adaptive_test_cfg.hand_slot);
-        const std::vector<sc::Detection> person_dets =
-            dets_for_slot(dets, g_adaptive_test_cfg.person_slot);
-        const bool hand_seen = !hand_dets.empty();
-        if (hand_seen) {
-            g_adaptive_no_hand_frames = 0;
-            if (g_adaptive_test_mode != AdaptiveTestMode::HandPreferred) {
-                g_adaptive_test_mode = AdaptiveTestMode::HandPreferred;
-                apply_adaptive_test_weights_if_needed(g_adaptive_test_mode);
-            }
-        } else {
-            g_adaptive_no_hand_frames++;
-            if (g_adaptive_no_hand_frames >= g_adaptive_test_cfg.no_hand_frames_to_fallback &&
-                g_adaptive_test_mode != AdaptiveTestMode::PersonPreferred) {
-                g_adaptive_test_mode = AdaptiveTestMode::PersonPreferred;
-                apply_adaptive_test_weights_if_needed(g_adaptive_test_mode);
-            }
-        }
+    // Check if this is an interframe tracker result (model_id == -1).
+    // Tracker frames already contain a single tracked target and should
+    // bypass HandTargetTracker / adaptive policy (which rely on full YOLO output).
+    const bool is_tracker_frame = !dets.empty() && dets[0].model_id == -1;
 
-        // Output target follows current policy mode, not only current-frame hand_seen.
-        if (g_adaptive_test_mode == AdaptiveTestMode::HandPreferred) {
-            tracked = g_hand_policy_tracker.update(hand_dets);
+    if (is_tracker_frame) {
+        active = &dets;
+    } else if (sc::ai_capture_target_policy_enabled(g_ai_for_policy)) {
+        // Unified target policy: ai_capture manages debounce + model weights.
+        // We just filter output to the current target slot for stream consistency.
+        int target_slot = sc::ai_capture_get_target_slot(g_ai_for_policy);
+        auto mode = sc::ai_capture_get_target_mode(g_ai_for_policy);
+        auto slot_dets = dets_for_slot(dets, target_slot);
+        if (mode == sc::TargetMode::HandPreferred) {
+            tracked = g_hand_policy_tracker.update(slot_dets);
         } else {
-            tracked = g_person_policy_tracker.update(person_dets);
+            tracked = g_person_policy_tracker.update(slot_dets);
         }
         active = &tracked;
     } else if (g_enable_hand_tracker) {
@@ -1120,9 +1113,48 @@ static void store_to_config(sc::Config& cfg) {
         slot.rknn.model_path     = m2;
         slot.rknn.conf_threshold = s.get<float>(model2_conf);
         slot.rknn.nms_threshold  = 0.45f;
+        slot.rknn.labels         = s.get<std::string>(model2_labels);
         cfg.extra_models.push_back(std::move(slot));
     }
     if (cfg.test_adaptive_hand_person) cfg.weighted_scheduler = true;
+
+    // Interframe tracker (DP-only, no CLI)
+    cfg.tracker_yolo_interval       = (int)s.get<uint32_t>(tracker_yolo_interval);
+    cfg.tracker_enable_mosse        = s.get<bool>(tracker_enable_mosse);
+    cfg.tracker_mosse_psr_threshold = s.get<float>(tracker_mosse_psr);
+    cfg.tracker_mosse_learning_rate = s.get<float>(tracker_mosse_learn_rate);
+    cfg.tracker_mosse_patch_size    = (int)s.get<uint32_t>(tracker_mosse_patch_size);
+    cfg.tracker_roi_padding         = s.get<float>(tracker_roi_padding);
+    cfg.tracker_smooth_factor       = s.get<float>(tracker_smooth_factor);
+    cfg.tracker_adaptive_interval   = s.get<bool>(tracker_adaptive_interval);
+    cfg.tracker_max_skip            = (int)s.get<uint32_t>(tracker_max_skip);
+    cfg.tracker_min_skip            = (int)s.get<uint32_t>(tracker_min_skip);
+
+    cfg.ai_target_fps               = (int)s.get<uint32_t>(ai_target_fps);
+
+    // Clamp tracker params
+    if (cfg.tracker_yolo_interval < 1) cfg.tracker_yolo_interval = 1;
+    if (cfg.tracker_mosse_psr_threshold < 0.0f) cfg.tracker_mosse_psr_threshold = 0.0f;
+    if (cfg.tracker_mosse_learning_rate < 0.0f) cfg.tracker_mosse_learning_rate = 0.0f;
+    if (cfg.tracker_mosse_learning_rate > 1.0f) cfg.tracker_mosse_learning_rate = 1.0f;
+    {
+        int ps = cfg.tracker_mosse_patch_size;
+        if (ps < 16) ps = 16;
+        if (ps > 256) ps = 256;
+        int p2 = 16;
+        while (p2 < ps) p2 <<= 1;
+        cfg.tracker_mosse_patch_size = p2;
+    }
+    if (cfg.tracker_roi_padding < 1.0f) cfg.tracker_roi_padding = 1.0f;
+    if (cfg.tracker_smooth_factor < 0.0f) cfg.tracker_smooth_factor = 0.0f;
+    if (cfg.tracker_smooth_factor > 1.0f) cfg.tracker_smooth_factor = 1.0f;
+    if (cfg.tracker_max_skip < 1) cfg.tracker_max_skip = 1;
+    if (cfg.tracker_min_skip < 0) cfg.tracker_min_skip = 0;
+    if (cfg.tracker_min_skip > cfg.tracker_max_skip) cfg.tracker_min_skip = cfg.tracker_max_skip;
+    cfg.tracker_hand_confirm        = (int)s.get<uint32_t>(tracker_hand_confirm);
+    cfg.tracker_hand_lost           = (int)s.get<uint32_t>(tracker_hand_lost);
+    if (cfg.tracker_hand_confirm < 1) cfg.tracker_hand_confirm = 1;
+    if (cfg.tracker_hand_lost < 1) cfg.tracker_hand_lost = 1;
 
     // Derived / hard-coded (no longer DPs)
     cfg.rtsp.gop              = cfg.stream.fps;
@@ -1157,6 +1189,8 @@ int main(int argc, char** argv) {
     g_adaptive_test_cfg.no_hand_frames_to_fallback = cfg.test_no_hand_frames_to_fallback;
     g_adaptive_test_mode = AdaptiveTestMode::Neutral;
     g_adaptive_no_hand_frames = 0;
+    g_adaptive_hand_confirm_frames = 0;
+    g_adaptive_last_switch = std::chrono::steady_clock::now();
     g_hand_policy_tracker.reset();
     g_person_policy_tracker.reset();
 
@@ -1248,9 +1282,6 @@ int main(int argc, char** argv) {
             g_ai_for_policy = nullptr;
         } else {
             g_ai_for_policy = ai;
-            if (g_adaptive_test_cfg.enabled) {
-                apply_adaptive_test_weights_if_needed(AdaptiveTestMode::Neutral);
-            }
         }
     }
 
@@ -1289,17 +1320,64 @@ int main(int argc, char** argv) {
                     g_rive_renderer.setTargetLabel(s.get<std::string>(rive_target));
                     break;
                 case adaptive_tracking: {
-                    const bool enabled = s.get<bool>(adaptive_tracking);
-                    g_adaptive_test_cfg.enabled = enabled;
-                    g_adaptive_test_mode = AdaptiveTestMode::Neutral;
-                    g_adaptive_no_hand_frames = 0;
+                    // Delegate to ai_capture's unified target policy via
+                    // the tracker config update path (reads all Config fields).
+                    if (!g_ai_for_policy) break;
+                    sc::Config tcfg;
+                    tcfg.test_adaptive_hand_person = s.get<bool>(adaptive_tracking);
+                    tcfg.tracker_yolo_interval     = (int)s.get<uint32_t>(tracker_yolo_interval);
+                    tcfg.tracker_enable_mosse      = s.get<bool>(tracker_enable_mosse);
+                    tcfg.tracker_mosse_psr_threshold = s.get<float>(tracker_mosse_psr);
+                    tcfg.tracker_mosse_learning_rate = s.get<float>(tracker_mosse_learn_rate);
+                    tcfg.tracker_mosse_patch_size   = (int)s.get<uint32_t>(tracker_mosse_patch_size);
+                    tcfg.tracker_roi_padding        = s.get<float>(tracker_roi_padding);
+                    tcfg.tracker_smooth_factor      = s.get<float>(tracker_smooth_factor);
+                    tcfg.tracker_adaptive_interval  = s.get<bool>(tracker_adaptive_interval);
+                    tcfg.tracker_max_skip           = (int)s.get<uint32_t>(tracker_max_skip);
+                    tcfg.tracker_min_skip           = (int)s.get<uint32_t>(tracker_min_skip);
+                    tcfg.tracker_hand_confirm       = (int)s.get<uint32_t>(tracker_hand_confirm);
+                    tcfg.tracker_hand_lost          = (int)s.get<uint32_t>(tracker_hand_lost);
                     g_hand_policy_tracker.reset();
                     g_person_policy_tracker.reset();
-                    if (enabled) {
-                        apply_adaptive_test_weights_if_needed(AdaptiveTestMode::Neutral);
-                    }
-                    SC_LOG_INFO("Adaptive hand/person test policy changed via DP: %s",
-                                enabled ? "enabled" : "disabled");
+                    sc::ai_capture_update_tracker_config(g_ai_for_policy, tcfg);
+                    SC_LOG_INFO("Target policy changed via DP: %s",
+                                tcfg.test_adaptive_hand_person ? "enabled" : "disabled");
+                    break;
+                }
+                case tracker_yolo_interval:
+                case tracker_enable_mosse:
+                case tracker_mosse_psr:
+                case tracker_mosse_learn_rate:
+                case tracker_mosse_patch_size:
+                case tracker_roi_padding:
+                case tracker_smooth_factor:
+                case tracker_adaptive_interval:
+                case tracker_max_skip:
+                case tracker_min_skip:
+                case tracker_hand_confirm:
+                case tracker_hand_lost: {
+                    if (!g_ai_for_policy) break;
+                    sc::Config tcfg;
+                    tcfg.test_adaptive_hand_person   = s.get<bool>(adaptive_tracking);
+                    tcfg.tracker_yolo_interval       = (int)s.get<uint32_t>(tracker_yolo_interval);
+                    tcfg.tracker_enable_mosse        = s.get<bool>(tracker_enable_mosse);
+                    tcfg.tracker_mosse_psr_threshold = s.get<float>(tracker_mosse_psr);
+                    tcfg.tracker_mosse_learning_rate = s.get<float>(tracker_mosse_learn_rate);
+                    tcfg.tracker_mosse_patch_size    = (int)s.get<uint32_t>(tracker_mosse_patch_size);
+                    tcfg.tracker_roi_padding         = s.get<float>(tracker_roi_padding);
+                    tcfg.tracker_smooth_factor       = s.get<float>(tracker_smooth_factor);
+                    tcfg.tracker_adaptive_interval   = s.get<bool>(tracker_adaptive_interval);
+                    tcfg.tracker_max_skip            = (int)s.get<uint32_t>(tracker_max_skip);
+                    tcfg.tracker_min_skip            = (int)s.get<uint32_t>(tracker_min_skip);
+                    tcfg.tracker_hand_confirm        = (int)s.get<uint32_t>(tracker_hand_confirm);
+                    tcfg.tracker_hand_lost           = (int)s.get<uint32_t>(tracker_hand_lost);
+                    sc::ai_capture_update_tracker_config(g_ai_for_policy, tcfg);
+                    break;
+                }
+                case ai_target_fps: {
+                    if (!g_ai_for_policy) break;
+                    int fps = (int)s.get<uint32_t>(ai_target_fps);
+                    sc::ai_capture_set_target_fps(g_ai_for_policy, fps);
                     break;
                 }
             }
@@ -1410,7 +1488,8 @@ int main(int argc, char** argv) {
     SC_LOG_INFO("  Press Ctrl+C to stop");
     fprintf(stderr, "\n");
 
-    // --- Main loop: poll control socket + SoulLink commands ---
+    // --- Main loop: poll control socket + SoulLink commands + RTSP health ---
+    int rtsp_health_counter = 0;
     while (!g_shutdown) {
         ctrl_poll(ai, cfg);
         if (soullink) {
@@ -1420,6 +1499,16 @@ int main(int argc, char** argv) {
                 process_soullink_sys_cmd(soullink.get(), ai, cfg, req);
             }
         }
+
+        // Check RTSP health every ~5 seconds (50 * 100ms)
+        if (++rtsp_health_counter >= 50) {
+            rtsp_health_counter = 0;
+            if (rtsp && !sc::rtsp_server_is_healthy(rtsp)) {
+                SC_LOG_ERROR("RTSP pipeline unhealthy -- attempting auto-recovery");
+                sc::rtsp_server_reset(rtsp);
+            }
+        }
+
         usleep(100000);  // 100ms polling interval
     }
 

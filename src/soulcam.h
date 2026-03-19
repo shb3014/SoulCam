@@ -189,6 +189,23 @@ struct Config {
     int          test_weight_low = 1;
     int          test_no_hand_frames_to_fallback = 8;
 
+    // Interframe tracker: lightweight CPU tracker between YOLO frames.
+    // When yolo_interval > 1, YOLO runs every N-th frame and the MOSSE+Kalman
+    // tracker provides smooth updates on intermediate frames.
+    int          tracker_yolo_interval       = 1;     // 1 = disabled (YOLO every frame)
+    bool         tracker_enable_mosse        = true;
+    float        tracker_mosse_psr_threshold = 7.0f;
+    float        tracker_mosse_learning_rate = 0.125f;
+    int          tracker_mosse_patch_size    = 64;
+    float        tracker_roi_padding         = 2.0f;
+    float        tracker_smooth_factor       = 0.6f;   // EMA smoothing for YOLO re-anchor
+    bool         tracker_adaptive_interval   = false;   // Dynamic YOLO scheduling
+    int          tracker_max_skip            = 8;       // Max frames without YOLO (adaptive)
+    int          tracker_min_skip            = 2;       // Min frames between YOLO (adaptive)
+    int          tracker_hand_confirm        = 3;       // YOLO frames with hand to switch to HandPreferred
+    int          tracker_hand_lost           = 5;       // YOLO frames without hand to switch to PersonFallback
+    int          ai_target_fps              = 0;       // 0 = unlimited; >0 = cap AI pipeline output FPS
+
     // Advanced hand-target switching (Phase 3).
     // Disabled by default; applies only when hand single-target tracker is enabled.
     bool         hand_fast_switch = false;

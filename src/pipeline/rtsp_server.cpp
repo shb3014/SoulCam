@@ -21,6 +21,7 @@
 #include <gst/rtsp-server/rtsp-server.h>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <cstring>
 
 namespace sc {
@@ -31,6 +32,12 @@ struct RtspServer {
     GstRTSPMediaFactory*    factory = nullptr;
     std::thread             thread;
     std::atomic<bool>       running{false};
+    std::atomic<bool>       media_error{false};
+
+    // For health check / reset
+    std::mutex              mu;
+    Config                  cfg;
+    std::string             mount;
 };
 
 // ---------------------------------------------------------------------------
@@ -104,6 +111,79 @@ std::string rtsp_build_launch(const Config& cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// RTSP media pipeline error monitoring
+// ---------------------------------------------------------------------------
+
+static gboolean on_rtsp_bus_message(GstBus* /*bus*/, GstMessage* msg,
+                                     gpointer user_data) {
+    auto* srv = static_cast<RtspServer*>(user_data);
+
+    switch (GST_MESSAGE_TYPE(msg)) {
+        case GST_MESSAGE_ERROR: {
+            GError* err = nullptr;
+            gchar*  dbg = nullptr;
+            gst_message_parse_error(msg, &err, &dbg);
+            SC_LOG_ERROR("RTSP pipeline error: %s (src=%s)",
+                         err ? err->message : "unknown",
+                         GST_MESSAGE_SRC_NAME(msg));
+            if (dbg) SC_LOG_DEBUG("  RTSP debug: %s", dbg);
+            g_clear_error(&err);
+            g_free(dbg);
+            srv->media_error.store(true, std::memory_order_release);
+            break;
+        }
+        case GST_MESSAGE_WARNING: {
+            GError* err = nullptr;
+            gchar*  dbg = nullptr;
+            gst_message_parse_warning(msg, &err, &dbg);
+            SC_LOG_WARN("RTSP pipeline warning: %s (src=%s)",
+                        err ? err->message : "unknown",
+                        GST_MESSAGE_SRC_NAME(msg));
+            if (dbg) SC_LOG_DEBUG("  RTSP debug: %s", dbg);
+            g_clear_error(&err);
+            g_free(dbg);
+            break;
+        }
+        case GST_MESSAGE_EOS:
+            SC_LOG_WARN("RTSP pipeline EOS (src=%s)", GST_MESSAGE_SRC_NAME(msg));
+            srv->media_error.store(true, std::memory_order_release);
+            break;
+        case GST_MESSAGE_STATE_CHANGED: {
+            if (GST_MESSAGE_SRC(msg) == nullptr) break;
+            GstState old_state, new_state;
+            gst_message_parse_state_changed(msg, &old_state, &new_state, nullptr);
+            if (new_state == GST_STATE_NULL && old_state == GST_STATE_READY) {
+                SC_LOG_WARN("RTSP pipeline went to NULL (src=%s)",
+                            GST_MESSAGE_SRC_NAME(msg));
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return TRUE;
+}
+
+static void on_rtsp_media_configure(GstRTSPMediaFactory* /*factory*/,
+                                     GstRTSPMedia* media,
+                                     gpointer user_data) {
+    auto* srv = static_cast<RtspServer*>(user_data);
+
+    GstElement* element = gst_rtsp_media_get_element(media);
+    if (!element) return;
+
+    GstBus* bus = gst_element_get_bus(element);
+    if (bus) {
+        gst_bus_add_watch(bus, on_rtsp_bus_message, srv);
+        gst_object_unref(bus);
+    }
+    gst_object_unref(element);
+
+    srv->media_error.store(false, std::memory_order_release);
+    SC_LOG_INFO("RTSP media pipeline created -- bus watch attached");
+}
+
+// ---------------------------------------------------------------------------
 // RTSP server lifecycle
 // ---------------------------------------------------------------------------
 
@@ -148,7 +228,10 @@ RtspServer* rtsp_server_start(const Config& cfg) {
     gst_rtsp_mount_points_add_factory(mounts, cfg.rtsp.mount.c_str(), srv->factory);
     g_object_unref(mounts);
 
-    // Hook overlay (if enabled)
+    // Hook media-configure for bus watch (error logging) + optional overlay
+    g_signal_connect(srv->factory, "media-configure",
+                     G_CALLBACK(on_rtsp_media_configure), srv);
+
     if (cfg.enable_overlay && cfg.enable_ai) {
         overlay_setup_factory(reinterpret_cast<GstElement*>(srv->factory),
                               cfg.stream.width, cfg.stream.height);
@@ -165,6 +248,8 @@ RtspServer* rtsp_server_start(const Config& cfg) {
     }
 
     srv->running = true;
+    srv->cfg = cfg;
+    srv->mount = cfg.rtsp.mount;
     srv->thread = std::thread(main_loop_func, srv);
 
     SC_LOG_INFO("RTSP server listening on rtsp://0.0.0.0:%d%s",
@@ -197,6 +282,46 @@ void rtsp_server_stop(RtspServer* srv) {
 
 GMainLoop* rtsp_server_get_loop(RtspServer* srv) {
     return srv ? srv->loop : nullptr;
+}
+
+bool rtsp_server_is_healthy(RtspServer* srv) {
+    if (!srv || !srv->running) return false;
+    return !srv->media_error.load(std::memory_order_acquire);
+}
+
+bool rtsp_server_reset(RtspServer* srv) {
+    if (!srv || !srv->server) return false;
+    std::lock_guard<std::mutex> lock(srv->mu);
+
+    SC_LOG_WARN("RTSP server reset: recreating media factory");
+
+    GstRTSPMountPoints* mounts = gst_rtsp_server_get_mount_points(srv->server);
+    gst_rtsp_mount_points_remove_factory(mounts, srv->mount.c_str());
+
+    srv->factory = gst_rtsp_media_factory_new();
+    gst_rtsp_media_factory_set_shared(srv->factory, TRUE);
+
+    std::string launch = rtsp_build_launch(srv->cfg);
+    gst_rtsp_media_factory_set_launch(srv->factory, launch.c_str());
+
+    gst_rtsp_media_factory_set_protocols(srv->factory,
+        (GstRTSPLowerTrans)(GST_RTSP_LOWER_TRANS_UDP | GST_RTSP_LOWER_TRANS_TCP));
+
+    g_signal_connect(srv->factory, "media-configure",
+                     G_CALLBACK(on_rtsp_media_configure), srv);
+
+    if (srv->cfg.enable_overlay && srv->cfg.enable_ai) {
+        overlay_setup_factory(reinterpret_cast<GstElement*>(srv->factory),
+                              srv->cfg.stream.width, srv->cfg.stream.height);
+    }
+
+    gst_rtsp_mount_points_add_factory(mounts, srv->mount.c_str(), srv->factory);
+    g_object_unref(mounts);
+
+    srv->media_error.store(false, std::memory_order_release);
+
+    SC_LOG_INFO("RTSP server reset complete -- new factory mounted");
+    return true;
 }
 
 }  // namespace sc

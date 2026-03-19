@@ -136,6 +136,7 @@ set(SOULCAM_SOURCES
     pipeline/tuya_ipc.cpp
     ai/detector.cpp
     ai/hand_target_tracker.cpp
+    ai/interframe_tracker.cpp
     ai/model_pipeline.cpp
     util/logger.cpp
 )

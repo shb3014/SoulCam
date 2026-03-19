@@ -47,4 +47,13 @@ GMainLoop* rtsp_server_get_loop(RtspServer* srv);
 // Exposed for testing / logging.
 std::string rtsp_build_launch(const Config& cfg);
 
+// Returns true if the RTSP media pipeline is healthy (PLAYING state).
+// Returns false if no media exists yet (no client has connected) or
+// the pipeline has entered ERROR/NULL state.
+bool rtsp_server_is_healthy(RtspServer* srv);
+
+// Force-recreate the RTSP media factory, tearing down any existing
+// media/pipeline.  Use after is_healthy() returns false to recover.
+bool rtsp_server_reset(RtspServer* srv);
+
 }  // namespace sc

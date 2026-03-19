@@ -34,6 +34,8 @@ namespace sc {
 using AiCallback = std::function<void(const std::vector<Detection>& detections,
                                        int frame_width, int frame_height)>;
 
+enum class TargetMode { HandPreferred, PersonFallback };
+
 struct AiCapture;
 
 // Start the AI capture pipeline with multi-model support.
@@ -70,5 +72,24 @@ ModelSlotConfig ai_capture_get_model_info(AiCapture* cap, int slot_idx);
 
 // Get multiline model debug status report.
 std::string ai_capture_debug_status(AiCapture* cap);
+
+// Reset the interframe tracker (e.g. on target loss).
+void ai_capture_reset_tracker(AiCapture* cap);
+
+// Update the interframe tracker configuration at runtime.
+// Handles creating/destroying the tracker if yolo_interval transitions
+// between 1 (disabled) and >1 (enabled).  Thread-safe with the appsink callback.
+void ai_capture_update_tracker_config(AiCapture* cap, const Config& cfg);
+
+// Set the AI pipeline target FPS (0 = unlimited, >0 = cap).
+// Frames arriving faster than 1/target_fps are dropped before processing.
+// Thread-safe (atomic store).
+void ai_capture_set_target_fps(AiCapture* cap, int fps);
+
+// Unified target policy: hand-preferred with person-fallback, integrated
+// with interframe tracker and model weight scheduling.
+bool ai_capture_target_policy_enabled(AiCapture* cap);
+TargetMode ai_capture_get_target_mode(AiCapture* cap);
+int  ai_capture_get_target_slot(AiCapture* cap);
 
 }  // namespace sc

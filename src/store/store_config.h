@@ -46,6 +46,21 @@ namespace SoulCamDp {
         enable_rive,            // bool      false
         rive_resolution,        // uint32_t  500
 
+        // Interframe tracker
+        tracker_yolo_interval,  // uint32_t  1     (1 = disabled)
+        tracker_enable_mosse,   // bool      true
+        tracker_mosse_psr,      // float     7.0
+        tracker_mosse_learn_rate,// float    0.125
+        tracker_mosse_patch_size,// uint32_t 64
+        tracker_roi_padding,    // float     2.0
+        tracker_smooth_factor,  // float     0.6
+        tracker_adaptive_interval, // bool   false
+        tracker_max_skip,       // uint32_t  8
+        tracker_min_skip,       // uint32_t  2
+        tracker_hand_confirm,   // uint32_t  3  (YOLO frames with hand to confirm switch)
+        tracker_hand_lost,      // uint32_t  5  (YOLO frames without hand to fallback)
+        ai_target_fps,          // uint32_t  0  (0 = unlimited; >0 = cap AI pipeline FPS)
+
         VALUE_END,
 
         // String persist keys (offset to avoid binary-format issues in future)
@@ -57,6 +72,7 @@ namespace SoulCamDp {
         model2_path,            // string    ""
         rive_file,              // string    ""
         rive_target,            // string    "person"
+        model2_labels,          // string    ""  (e.g. "hand")
         STRING_END,
 
         PERSIST_END = STRING_END,

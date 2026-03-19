@@ -24,7 +24,7 @@ std::unordered_map<int, StateType> getDefaultValueMap() {
         {verbose,               false},
 
         // Multi-model & adaptive tracking
-        {model2_conf,           0.25f},
+        {model2_conf,           0.15f},
         {adaptive_tracking,     false},
         {weighted_scheduler,    false},
         {max_models_per_frame,  (uint32_t)1},
@@ -32,6 +32,21 @@ std::unordered_map<int, StateType> getDefaultValueMap() {
         // Rive renderer
         {enable_rive,           false},
         {rive_resolution,       (uint32_t)500},
+
+        // Interframe tracker
+        {tracker_yolo_interval,   (uint32_t)1},
+        {tracker_enable_mosse,    true},
+        {tracker_mosse_psr,       7.0f},
+        {tracker_mosse_learn_rate,0.125f},
+        {tracker_mosse_patch_size,(uint32_t)64},
+        {tracker_roi_padding,     2.0f},
+        {tracker_smooth_factor,   0.6f},
+        {tracker_adaptive_interval, false},
+        {tracker_max_skip,        (uint32_t)8},
+        {tracker_min_skip,        (uint32_t)2},
+        {tracker_hand_confirm,    (uint32_t)3},
+        {tracker_hand_lost,       (uint32_t)5},
+        {ai_target_fps,           (uint32_t)0},
 
         // Strings
         {rtsp_mount,            std::string("/cam")},
@@ -41,6 +56,7 @@ std::unordered_map<int, StateType> getDefaultValueMap() {
         {model2_path,           std::string("")},
         {rive_file,             std::string("")},
         {rive_target,           std::string("person")},
+        {model2_labels,         std::string("")},
 
         // RAM (runtime)
         {rtsp_online,           false},
@@ -68,6 +84,19 @@ std::map<std::string, int> getPersistKeyMap() {
         {"max_models_per_frame",  max_models_per_frame},
         {"enable_rive",           enable_rive},
         {"rive_resolution",       rive_resolution},
+        {"tracker_yolo_interval",   tracker_yolo_interval},
+        {"tracker_enable_mosse",    tracker_enable_mosse},
+        {"tracker_mosse_psr",       tracker_mosse_psr},
+        {"tracker_mosse_learn_rate",tracker_mosse_learn_rate},
+        {"tracker_mosse_patch_size",tracker_mosse_patch_size},
+        {"tracker_roi_padding",     tracker_roi_padding},
+        {"tracker_smooth_factor",   tracker_smooth_factor},
+        {"tracker_adaptive_interval", tracker_adaptive_interval},
+        {"tracker_max_skip",        tracker_max_skip},
+        {"tracker_min_skip",        tracker_min_skip},
+        {"tracker_hand_confirm",    tracker_hand_confirm},
+        {"tracker_hand_lost",       tracker_hand_lost},
+        {"ai_target_fps",           ai_target_fps},
         {"rtsp_mount",            rtsp_mount},
         {"ai_model_path",         ai_model_path},
         {"ai_labels",             ai_labels},
@@ -75,6 +104,7 @@ std::map<std::string, int> getPersistKeyMap() {
         {"model2_path",           model2_path},
         {"rive_file",             rive_file},
         {"rive_target",           rive_target},
+        {"model2_labels",         model2_labels},
     };
 }
 
