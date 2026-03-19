@@ -89,24 +89,35 @@ struct AiCapture {
     Clock::time_point fps_last_log = Clock::now();
     uint32_t fps_total_frames = 0;
     uint32_t fps_yolo_frames  = 0;
+    uint32_t fps_cam_frames   = 0;  // raw camera delivery count (before throttle)
 
     AiCallback      callback;
 
     int width  = 640;
     int height = 480;
+
+    // Letterbox: capture at camera resolution, pad to model input size.
+    // Preserves aspect ratio for better YOLO accuracy.
+    int cap_w = 640;     // camera capture width (RGB from rgaconvert)
+    int cap_h = 480;     // camera capture height
+    int model_w = 640;   // model input width (after letterbox)
+    int model_h = 640;   // model input height (after letterbox)
+    int lb_pad_top = 0;  // letterbox padding (top/bottom)
+    std::vector<uint8_t> lb_buf;  // letterboxed RGB buffer (model_w * model_h * 3)
+
+    // Frame timing for time-aware Kalman
+    Clock::time_point last_frame_time{};
+    bool has_frame_time = false;
+    static constexpr float kRefIntervalMs = 33.33f; // reference dt=1.0 at 30fps
 };
 
 // ---------------------------------------------------------------------------
 // GStreamer pipeline construction
 // ---------------------------------------------------------------------------
 
-static std::string build_ai_pipeline(const Config& cfg,
-                                      int model_w = 0, int model_h = 0) {
+static std::string build_ai_pipeline(const Config& cfg, int cap_w, int cap_h) {
     const auto& ai  = cfg.ai;
     const auto& isp = cfg.isp;
-
-    int out_w = (model_w > 0) ? model_w : ai.width;
-    int out_h = (model_h > 0) ? model_h : ai.height;
 
     std::string pipeline;
 
@@ -123,8 +134,8 @@ static std::string build_ai_pipeline(const Config& cfg,
 
     pipeline += " ! rgaconvert"
                 " ! video/x-raw,format=RGB"
-                ",width=" + std::to_string(out_w) +
-                ",height=" + std::to_string(out_h);
+                ",width=" + std::to_string(cap_w) +
+                ",height=" + std::to_string(cap_h);
 
     pipeline += " ! appsink name=ai_sink emit-signals=true"
                 " max-buffers=2 drop=true sync=false";
@@ -160,6 +171,31 @@ static void rgb_to_gray(const uint8_t* rgb, uint8_t* gray, int w, int h) {
             (77u * rgb[i*3] + 150u * rgb[i*3+1] + 29u * rgb[i*3+2]) >> 8);
     }
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Letterbox: pad camera frame (cap_w x cap_h) to model input (model_w x model_h)
+// with gray=128 bars, preserving aspect ratio. Returns pointer to letterboxed buffer.
+// ---------------------------------------------------------------------------
+
+static void letterbox_pad(const uint8_t* src, int cap_w, int cap_h,
+                           uint8_t* dst, int model_w, int model_h,
+                           int pad_top) {
+    const int row_bytes = model_w * 3;
+    std::memset(dst, 128, pad_top * row_bytes);
+    std::memcpy(dst + pad_top * row_bytes, src, cap_w * cap_h * 3);
+    const int pad_bottom = model_h - cap_h - pad_top;
+    if (pad_bottom > 0)
+        std::memset(dst + (pad_top + cap_h) * row_bytes, 128, pad_bottom * row_bytes);
+}
+
+// Un-letterbox: adjust detection coordinates from model space back to camera space.
+static void unletterbox_detections(std::vector<Detection>& dets,
+                                    int pad_top, int cap_h) {
+    for (auto& d : dets) {
+        d.top    = std::max(0, std::min(d.top - pad_top, cap_h));
+        d.bottom = std::max(0, std::min(d.bottom - pad_top, cap_h));
+    }
 }
 
 static int pick_best_detection(const std::vector<Detection>& dets) {
@@ -345,19 +381,24 @@ static GstFlowReturn on_new_sample(GstAppSink* sink, gpointer user_data) {
         return GST_FLOW_OK;
     }
 
-    // FPS throttle: skip frame if under target period
+    cap->fps_cam_frames++;
+
     int tfps = cap->target_fps.load(std::memory_order_relaxed);
     if (tfps > 0) {
         auto now = AiCapture::Clock::now();
-        auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
-            now - cap->last_process_time).count();
-        long long min_interval_us = 1000000LL / tfps;
-        if (elapsed_us < min_interval_us) {
+        auto min_interval = std::chrono::microseconds(1000000LL / tfps);
+        constexpr auto kJitterTolerance = std::chrono::microseconds(2000);
+
+        if (now + kJitterTolerance < cap->last_process_time + min_interval) {
             gst_buffer_unmap(buffer, &map);
             gst_sample_unref(sample);
             return GST_FLOW_OK;
         }
-        cap->last_process_time = now;
+
+        cap->last_process_time += min_interval;
+        if (cap->last_process_time + min_interval < now) {
+            cap->last_process_time = now;
+        }
     }
 
     const bool tracker_active = cap->tracker && cap->yolo_interval > 1;
@@ -372,29 +413,62 @@ static GstFlowReturn on_new_sample(GstAppSink* sink, gpointer user_data) {
             now - cap->fps_last_log).count();
         if (elapsed >= 5000) {
             float secs = elapsed / 1000.0f;
+            float cam_fps   = cap->fps_cam_frames   / secs;
             float total_fps = cap->fps_total_frames / secs;
             float yolo_fps  = cap->fps_yolo_frames  / secs;
             if (tracker_active) {
-                SC_LOG_INFO("AI pipeline: %.1f fps total (YOLO %.1f fps + tracker %.1f fps, vel=%.1f psr=%.1f)",
+                SC_LOG_INFO("AI pipeline: %.1f fps total (YOLO %.1f + tracker %.1f, vel=%.1f psr=%.1f) | cam feed: %.1f fps",
                             total_fps, yolo_fps, total_fps - yolo_fps,
                             cap->tracker ? cap->tracker->velocity() : 0.0f,
-                            cap->tracker ? cap->tracker->psr() : 0.0f);
+                            cap->tracker ? cap->tracker->psr() : 0.0f,
+                            cam_fps);
             } else {
-                SC_LOG_INFO("AI pipeline: %.1f fps (YOLO only)", yolo_fps);
+                SC_LOG_INFO("AI pipeline: %.1f fps (YOLO only) | cam feed: %.1f fps",
+                            yolo_fps, cam_fps);
             }
             cap->fps_total_frames = 0;
             cap->fps_yolo_frames  = 0;
+            cap->fps_cam_frames   = 0;
             cap->fps_last_log     = now;
         }
     }
 
+    // Compute dt for time-aware Kalman (normalized so dt=1.0 at 30fps)
+    float frame_dt = 1.0f;
+    {
+        auto now = AiCapture::Clock::now();
+        if (cap->has_frame_time) {
+            float elapsed_ms = std::chrono::duration<float, std::milli>(
+                now - cap->last_frame_time).count();
+            frame_dt = std::max(0.1f, std::min(elapsed_ms / AiCapture::kRefIntervalMs, 5.0f));
+        }
+        cap->last_frame_time = now;
+        cap->has_frame_time = true;
+    }
+
     if (run_yolo && cap->model_pipe) {
+        // Letterbox camera frame to model input size
+        const uint8_t* infer_data = map.data;
+        int infer_w = cap->cap_w;
+        int infer_h = cap->cap_h;
+        if (cap->lb_pad_top > 0) {
+            letterbox_pad(map.data, cap->cap_w, cap->cap_h,
+                          cap->lb_buf.data(), cap->model_w, cap->model_h,
+                          cap->lb_pad_top);
+            infer_data = cap->lb_buf.data();
+            infer_w = cap->model_w;
+            infer_h = cap->model_h;
+        }
+
         std::vector<Detection> detections;
         int rc = model_pipeline_infer(cap->model_pipe,
-                                       map.data, map.size,
-                                       cap->width, cap->height, 3,
+                                       infer_data, infer_w * infer_h * 3,
+                                       infer_w, infer_h, 3,
                                        detections);
         if (rc == 0) {
+            if (cap->lb_pad_top > 0)
+                unletterbox_detections(detections, cap->lb_pad_top, cap->cap_h);
+
             cap->frames_since_yolo = 0;
 
             int best = cap->target.enabled
@@ -403,30 +477,32 @@ static GstFlowReturn on_new_sample(GstAppSink* sink, gpointer user_data) {
 
             if (tracker_active && best >= 0) {
                 cap->last_yolo_conf = detections[best].confidence;
-                const int npix = cap->width * cap->height;
+                const int npix = cap->cap_w * cap->cap_h;
                 cap->gray_buf.resize(npix);
-                rgb_to_gray(map.data, cap->gray_buf.data(), cap->width, cap->height);
+                rgb_to_gray(map.data, cap->gray_buf.data(), cap->cap_w, cap->cap_h);
                 cap->tracker->reinit(detections[best],
                                      cap->gray_buf.data(),
-                                     cap->width, cap->height);
+                                     cap->cap_w, cap->cap_h,
+                                     frame_dt);
             }
 
             if (cap->callback) {
-                cap->callback(detections, cap->width, cap->height);
+                cap->callback(detections, cap->cap_w, cap->cap_h);
             }
         }
     } else if (tracker_active && cap->tracker->is_tracking()) {
         cap->frames_since_yolo++;
-        const int npix = cap->width * cap->height;
+        const int npix = cap->cap_w * cap->cap_h;
         cap->gray_buf.resize(npix);
-        rgb_to_gray(map.data, cap->gray_buf.data(), cap->width, cap->height);
+        rgb_to_gray(map.data, cap->gray_buf.data(), cap->cap_w, cap->cap_h);
 
         Detection tracked = cap->tracker->update(cap->gray_buf.data(),
-                                                  cap->width, cap->height);
+                                                  cap->cap_w, cap->cap_h,
+                                                  frame_dt);
 
         if (cap->callback) {
             std::vector<Detection> dets = {tracked};
-            cap->callback(dets, cap->width, cap->height);
+            cap->callback(dets, cap->cap_w, cap->cap_h);
         }
     }
 
@@ -528,13 +604,31 @@ AiCapture* ai_capture_start(const Config& cfg, AiCallback cb) {
             SC_LOG_ERROR("Failed to create model pipeline -- AI will capture but not infer");
         } else {
             model_pipeline_get_input_size(cap->model_pipe, model_w, model_h, model_c);
-            cap->width  = model_w;
-            cap->height = model_h;
-            SC_LOG_INFO("AI pipeline will resize %dx%d -> %dx%d (primary model input)",
-                        cfg.ai.width, cfg.ai.height, model_w, model_h);
+            SC_LOG_INFO("AI model input: %dx%d, camera: %dx%d",
+                        model_w, model_h, cfg.ai.width, cfg.ai.height);
         }
     } else {
         SC_LOG_WARN("No RKNN model specified (--model); AI capture only, no inference");
+    }
+
+    // Letterbox setup: capture at camera resolution, pad to model size
+    cap->cap_w = cfg.ai.width;
+    cap->cap_h = cfg.ai.height;
+    cap->model_w = (model_w > 0) ? model_w : cfg.ai.width;
+    cap->model_h = (model_h > 0) ? model_h : cfg.ai.height;
+    cap->width  = cap->cap_w;
+    cap->height = cap->cap_h;
+
+    if (cap->cap_w == cap->model_w && cap->cap_h != cap->model_h &&
+        cap->model_h > cap->cap_h) {
+        cap->lb_pad_top = (cap->model_h - cap->cap_h) / 2;
+        cap->lb_buf.resize(cap->model_w * cap->model_h * 3);
+        SC_LOG_INFO("Letterbox: %dx%d -> %dx%d (pad_top=%d, gray=128)",
+                    cap->cap_w, cap->cap_h, cap->model_w, cap->model_h,
+                    cap->lb_pad_top);
+    } else if (cap->cap_w != cap->model_w || cap->cap_h != cap->model_h) {
+        SC_LOG_WARN("Camera %dx%d != model %dx%d, no letterbox (rgaconvert will stretch)",
+                    cap->cap_w, cap->cap_h, cap->model_w, cap->model_h);
     }
 
     cap->yolo_interval = std::max(1, cfg.tracker_yolo_interval);
@@ -586,7 +680,7 @@ AiCapture* ai_capture_start(const Config& cfg, AiCallback cb) {
         }
     }
 
-    std::string launch = build_ai_pipeline(cfg, model_w, model_h);
+    std::string launch = build_ai_pipeline(cfg, cap->cap_w, cap->cap_h);
     SC_LOG_INFO("AI pipeline: %s", launch.c_str());
 
     GError* error = nullptr;
@@ -630,8 +724,9 @@ AiCapture* ai_capture_start(const Config& cfg, AiCallback cb) {
     cap->thread = std::thread(ai_thread_func, cap);
 
     int model_count = model_pipeline_count(cap->model_pipe);
-    SC_LOG_INFO("AI capture started: selfpath %dx%d, %d model slot(s)",
-                cap->width, cap->height, model_count);
+    SC_LOG_INFO("AI capture started: capture %dx%d, model %dx%d, letterbox=%s, %d model slot(s)",
+                cap->cap_w, cap->cap_h, cap->model_w, cap->model_h,
+                cap->lb_pad_top > 0 ? "yes" : "no", model_count);
     return cap;
 }
 

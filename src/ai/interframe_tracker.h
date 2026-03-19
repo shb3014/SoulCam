@@ -47,15 +47,18 @@ public:
 
     // Reinitialize tracker with a YOLO detection and the current grayscale frame.
     // Called on YOLO frames to anchor the tracker to a confirmed detection.
-    void reinit(const Detection& det, const uint8_t* gray, int img_w, int img_h);
+    // dt: normalized time step (1.0 = 33.3ms / 30fps). Used for Kalman prediction.
+    void reinit(const Detection& det, const uint8_t* gray, int img_w, int img_h,
+                float dt = 1.0f);
 
     // Predict-only (no visual input). Very fast (<0.01ms).
     // Use when grayscale frame is unavailable.
-    Detection predict();
+    Detection predict(float dt = 1.0f);
 
     // Update with visual correction (Kalman + KCF). ~3-5ms on A55.
     // Returns the tracked detection with PSR-based confidence.
-    Detection update(const uint8_t* gray, int img_w, int img_h);
+    // dt: normalized time step (1.0 = 33.3ms / 30fps).
+    Detection update(const uint8_t* gray, int img_w, int img_h, float dt = 1.0f);
 
     // Reset to no-track state.
     void reset();

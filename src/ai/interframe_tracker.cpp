@@ -555,11 +555,22 @@ void InterframeTracker::reset() {
 Detection InterframeTracker::smooth_output(float cx, float cy, float w, float h,
                                             float confidence, int model_id) {
     float alpha = cfg_.smooth_factor;
+
+    // Velocity-adaptive smoothing: less smoothing during fast motion,
+    // more smoothing when nearly static
+    float vel = impl_->kalman.velocity_mag();
+    if (vel > 30.0f)
+        alpha = std::min(1.0f, alpha * 1.6f);
+    else if (vel < 5.0f)
+        alpha = alpha * 0.5f;
+
+    float size_alpha = alpha * 0.4f;
+
     if (impl_->out_initialized) {
         impl_->out_cx = alpha * cx + (1.0f - alpha) * impl_->out_cx;
         impl_->out_cy = alpha * cy + (1.0f - alpha) * impl_->out_cy;
-        impl_->out_w  = alpha * w  + (1.0f - alpha) * impl_->out_w;
-        impl_->out_h  = alpha * h  + (1.0f - alpha) * impl_->out_h;
+        impl_->out_w  = size_alpha * w  + (1.0f - size_alpha) * impl_->out_w;
+        impl_->out_h  = size_alpha * h  + (1.0f - size_alpha) * impl_->out_h;
     } else {
         impl_->out_cx = cx;
         impl_->out_cy = cy;
@@ -583,7 +594,8 @@ Detection InterframeTracker::smooth_output(float cx, float cy, float w, float h,
 }
 
 void InterframeTracker::reinit(const Detection& det,
-                                const uint8_t* gray, int img_w, int img_h) {
+                                const uint8_t* gray, int img_w, int img_h,
+                                float dt) {
     float new_cx = 0.5f * static_cast<float>(det.left + det.right);
     float new_cy = 0.5f * static_cast<float>(det.top + det.bottom);
     float bw = static_cast<float>(std::max(1, det.right - det.left));
@@ -591,10 +603,17 @@ void InterframeTracker::reinit(const Detection& det,
 
     if (tracking_ && cfg_.smooth_factor < 1.0f) {
         float a = cfg_.smooth_factor;
+        float vel = impl_->kalman.velocity_mag();
+        if (vel > 30.0f)
+            a = std::min(1.0f, a * 1.6f);
+        else if (vel < 5.0f)
+            a = a * 0.5f;
+
+        float sa = a * 0.4f;
         impl_->center_x = a * new_cx + (1.0f - a) * impl_->center_x;
         impl_->center_y = a * new_cy + (1.0f - a) * impl_->center_y;
-        impl_->bbox_w   = a * bw + (1.0f - a) * impl_->bbox_w;
-        impl_->bbox_h   = a * bh + (1.0f - a) * impl_->bbox_h;
+        impl_->bbox_w   = sa * bw + (1.0f - sa) * impl_->bbox_w;
+        impl_->bbox_h   = sa * bh + (1.0f - sa) * impl_->bbox_h;
     } else {
         impl_->center_x = new_cx;
         impl_->center_y = new_cy;
@@ -603,8 +622,7 @@ void InterframeTracker::reinit(const Detection& det,
     }
 
     if (tracking_) {
-        // Preserve velocity estimate — just correct position via measurement
-        impl_->kalman.predict(1.0f);
+        impl_->kalman.predict(dt);
         impl_->kalman.update(impl_->center_x, impl_->center_y);
     } else {
         impl_->kalman.init(impl_->center_x, impl_->center_y);
@@ -632,14 +650,14 @@ void InterframeTracker::reinit(const Detection& det,
 
     tracking_ = true;
     last_psr_ = 20.0f;
-    SC_LOG_DEBUG("InterframeTracker: reinit at (%.0f,%.0f) size %.0fx%.0f",
-                 impl_->center_x, impl_->center_y, impl_->bbox_w, impl_->bbox_h);
+    SC_LOG_DEBUG("InterframeTracker: reinit at (%.0f,%.0f) size %.0fx%.0f dt=%.2f",
+                 impl_->center_x, impl_->center_y, impl_->bbox_w, impl_->bbox_h, dt);
 }
 
-Detection InterframeTracker::predict() {
+Detection InterframeTracker::predict(float dt) {
     if (!tracking_) return last_det_;
 
-    impl_->kalman.predict(1.0f);
+    impl_->kalman.predict(dt);
 
     float cx = impl_->kalman.x[0];
     float cy = impl_->kalman.x[1];
@@ -651,13 +669,14 @@ Detection InterframeTracker::predict() {
     return smooth_output(cx, cy, impl_->bbox_w, impl_->bbox_h, 0.5f, -1);
 }
 
-Detection InterframeTracker::update(const uint8_t* gray, int img_w, int img_h) {
+Detection InterframeTracker::update(const uint8_t* gray, int img_w, int img_h,
+                                    float dt) {
     if (!tracking_) return last_det_;
     if (!gray || !cfg_.enable_visual || !impl_->kcf.is_initialized()) {
-        return predict();
+        return predict(dt);
     }
 
-    impl_->kalman.predict(1.0f);
+    impl_->kalman.predict(dt);
     float pred_cx = impl_->kalman.x[0];
     float pred_cy = impl_->kalman.x[1];
 
@@ -672,17 +691,17 @@ Detection InterframeTracker::update(const uint8_t* gray, int img_w, int img_h) {
     float dx_img = result.dx * scale;
     float dy_img = result.dy * scale;
 
-    float meas_cx, meas_cy;
+    // Gradual PSR blending: linear interpolation between Kalman-only (PSR<=5)
+    // and full KCF displacement (PSR>=15), instead of binary threshold
+    float psr_weight = std::clamp((result.psr - 5.0f) / 10.0f, 0.0f, 1.0f);
+    float meas_cx = pred_cx + dx_img * psr_weight;
+    float meas_cy = pred_cy + dy_img * psr_weight;
     float confidence;
 
-    if (result.psr >= cfg_.visual_psr_threshold) {
-        meas_cx = pred_cx + dx_img;
-        meas_cy = pred_cy + dy_img;
+    if (psr_weight > 0.0f) {
         impl_->kalman.update(meas_cx, meas_cy);
         confidence = std::min(1.0f, result.psr / 20.0f);
     } else {
-        meas_cx = pred_cx;
-        meas_cy = pred_cy;
         confidence = 0.3f;
     }
 

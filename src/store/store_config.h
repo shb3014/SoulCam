@@ -37,7 +37,7 @@ namespace SoulCamDp {
         verbose,                // bool      false
 
         // Multi-model & adaptive tracking
-        model2_conf,            // float     0.25
+        model2_conf,            // float     0.15
         adaptive_tracking,      // bool      false
         weighted_scheduler,     // bool      false
         max_models_per_frame,   // uint32_t  1
