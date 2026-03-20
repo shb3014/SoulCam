@@ -345,9 +345,41 @@ saves CPU/NPU power when the full pipeline rate is not needed.
 
 The GStreamer pipeline requests `framerate=30/1` from v4l2src, but the ISP
 selfpath framerate is determined by the sensor clock, not the V4L2 caps
-filter. At 640×480, the ISP selfpath typically delivers **40+ fps**
+filter. At 640×480, the ISP selfpath can deliver **up to ~43 fps**
 (sensor-limited, not resolution-limited). Every delivered frame contains
 unique sensor data — there are no duplicates.
+
+**RKAIQ AE controls the actual sensor frame rate** via vertical blanking
+(vblank). Two IQ file parameters are critical:
+
+| IQ parameter | Path in JSON | Effect |
+|---|---|---|
+| `AecFrameRateMode.FpsValue` | `main_scene[0].sub_scene[0].scene_isp21.ae_calib.CommCtrl.AecFrameRateMode.FpsValue` | Target FPS for AE algorithm. RKAIQ sets vblank to achieve this rate. |
+| `CISMinFps` | `sensor_calib.CISMinFps` | Minimum FPS floor — AE won't extend exposure beyond this limit. |
+| `AecAntiFlicker` | `...CommCtrl.AecAntiFlicker` | 50/60Hz flicker avoidance. Quantizes exposure to 10ms/8.33ms multiples. |
+
+**Root cause of 14.6fps bug**: The IQ file (`ov5647_rpi-camera-v1p3_calibrated.json`)
+had `FpsValue=15`. This caused RKAIQ to inflate vblank to ~996 (targeting ~15fps)
+even in bright conditions where exposure was only 89 lines (~2ms) and gain was
+at minimum. Combined with 50Hz anti-flicker quantization, the effective rate
+was 14.6fps regardless of lighting.
+
+**Fix** (see `doc/issues/RKAIQ_FPS_AND_AE_OSCILLATION.md` for full details):
+Set `FpsValue=43`, `CISMinFps=15`, and disable `AecAntiFlicker` in the IQ file.
+Anti-flicker caused AE oscillation (exposure bouncing between two discrete
+quanta every frame). AE damping (`DampOver`, `DampDark2Bright`) increased
+from 0.15 to 0.35 to smooth light transitions. Now:
+- **Bright light**: vblank stays low (~24), camera delivers ~43fps, AI pipeline
+  processes ~28fps (limited by YOLO inference backpressure on the appsink).
+- **Low light**: exposure extends naturally, FPS drops proportionally to exposure
+  time (typically 15–20fps). CISMinFps=15 prevents going below 15fps.
+- **Light transitions**: smooth AE convergence, no flickering.
+
+The startup log now reports sensor state after ISP configuration:
+```
+Sensor state: vblank=24 exposure=89 gain=16 → est 43.2 fps (requested vblank=24 → 43.2 fps)
+```
+If vblank is high despite short exposure, check the IQ file FpsValue.
 
 Without `ai_target_fps`, the AI pipeline processes every camera frame,
 so total AI FPS equals the actual camera delivery rate, not the
@@ -392,17 +424,19 @@ to prevent burst processing.
 
 ### 8.1 Measured on RK3566 (1.8 GHz A55, 0.8 TOPS NPU)
 
-Note: ISP selfpath delivers ~40+ fps at 640×480 (sensor-limited). The
-`framerate=30/1` v4l2src cap is not enforced by the ISP driver.
+Note: ISP selfpath delivers up to ~43 fps at 640×480 (sensor-limited,
+vblank=24). Effective FPS depends on AE exposure time (lighting) and
+AI processing backpressure (YOLO inference blocks the appsink callback).
 
 | Configuration | Total FPS | YOLO FPS | Tracker FPS | Notes |
 |---------------|-----------|----------|-------------|-------|
 | YOLO only (no tracker) | ~7-10 | 7-10 | 0 | Limited by NPU inference time |
-| Tracker, `yolo_interval=4` | ~14.6 | 3.5–3.7 | 10.8–11.0 | ~60-75% NPU savings |
-| HandPreferred mode | ~14.6 | 3.5 | 11.0 | Hand model faster than person model |
-| Adaptive interval (static scene) | up to 20+ | ~2 | ~18 | YOLO rate drops for static targets |
-| Unlimited (`ai_target_fps=0`) | 40+ | varies | varies | Full camera rate, highest CPU/NPU use |
-| `ai_target_fps=30` | ~30 | varies | varies | Credit-based throttle, matches target |
+| Tracker, `yolo_interval=4`, bright | ~28 | 3.0–4.2 | 24–25 | Sensor at ~43fps, appsink backpressure |
+| Tracker, `yolo_interval=4`, low light | ~16 | 2.0–2.6 | 13–14 | AE extends exposure, frame rate drops |
+| HandPreferred mode, bright | ~28 | ~4 | ~24 | Hand model faster than person model |
+| Adaptive interval (static scene) | up to 30+ | ~2 | ~28 | YOLO rate drops for static targets |
+| Unlimited (`ai_target_fps=0`) | up to ~28 | varies | varies | Camera at 43fps, limited by YOLO backpressure |
+| `ai_target_fps=30` | ~28 | varies | varies | Credit-based throttle (close to natural limit) |
 | `ai_target_fps=10` | ~10 | ~2.5 | ~7.5 | FPS-capped, saves CPU power |
 | `ai_target_fps=5` | ~5 | ~1.25 | ~3.75 | Minimal CPU load for low-priority use |
 
@@ -523,22 +557,59 @@ tracker is active. This ensures hand/person mode switching and model
 scheduling work correctly even with `tracker_yolo_interval=1` (every
 frame is YOLO, no tracker).
 
+### Low FPS in bright conditions (RKAIQ vblank issue)
+
+If the camera delivers ~14-16 fps even in bright lighting (exposure short,
+gain at minimum), check the RKAIQ IQ file:
+
+```bash
+# Query sensor state
+v4l2-ctl -d /dev/v4l-subdev2 --get-ctrl=vertical_blanking,exposure,analogue_gain
+```
+
+If `exposure` is low (< 200) but `vertical_blanking` is high (> 400), RKAIQ
+is artificially limiting the frame rate. Fix the IQ file:
+
+```bash
+# On device — check/fix AecFrameRateMode.FpsValue
+python3 -c "
+import json
+path = '/etc/iqfiles/ov5647_rpi-camera-v1p3_calibrated.json'
+with open(path) as f:
+    iq = json.load(f)
+ae = iq['main_scene'][0]['sub_scene'][0]['scene_isp21']['ae_calib']
+print('FpsValue:', ae['CommCtrl']['AecFrameRateMode']['FpsValue'])
+print('CISMinFps:', iq['sensor_calib']['CISMinFps'])
+"
+```
+
+Target values: `FpsValue >= 43`, `CISMinFps = 15`. After editing, restart
+RKAIQ: `sudo systemctl restart rkaiq-3a`.
+
+The startup log now reports sensor state for early detection:
+```
+Sensor state: vblank=24 exposure=89 gain=16 → est 43.2 fps (requested vblank=24 → 43.2 fps)
+```
+
 ### Logs to check
 
 ```bash
 # Live logs
-sudo journalctl -u soulcam -f | grep -E "(TargetPick|Target policy|AI pipeline|Letterbox)"
+sudo journalctl -u soulcam -f | grep -E "(TargetPick|Target policy|AI pipeline|Letterbox|Sensor state)"
 
 # Startup verification
-sudo journalctl -u soulcam --since "30s ago" | grep -E "(slot|weight|scheduler|tracker|Target|Letterbox|capture)"
+sudo journalctl -u soulcam --since "30s ago" | grep -E "(slot|weight|scheduler|tracker|Target|Letterbox|capture|Sensor)"
 ```
 
 Expected log format:
 ```
-AI pipeline: 14.6 fps total (YOLO 1.8 + tracker 12.8, vel=1.7 psr=9.9) | cam feed: 14.6 fps
+AI pipeline: 27.8 fps total (YOLO 3.0 + tracker 24.8, vel=1.7 psr=9.9) | cam feed: 27.8 fps
 ```
 - `cam feed` = raw camera delivery rate (before throttle)
-- When `cam feed` ≈ AI total fps and both are low (~14 fps): camera is
+- In bright light, expect 25-30 fps (sensor at ~43fps, limited by YOLO
+  processing backpressure on the appsink)
+- In low light, expect 15-20 fps (AE extends exposure time naturally)
+- When `cam feed` ≈ AI total fps and both are low: camera is
   auto-exposure limited (low light), not an AI bottleneck
 - When `cam feed` > AI total fps: AI processing is the bottleneck
 - `Letterbox: 640x480 -> 640x640 (pad_top=80, gray=128)` confirms

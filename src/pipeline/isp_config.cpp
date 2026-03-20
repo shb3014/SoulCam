@@ -12,6 +12,7 @@
 
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace sc {
@@ -57,6 +58,47 @@ static std::string v4l2_set_crop(const std::string& dev,
            std::to_string(w) + ",height=" + std::to_string(h);
 }
 
+/// Read a single integer V4L2 control.  Returns -1 on failure.
+static int v4l2_get_ctrl_int(const std::string& dev, const char* ctrl) {
+    std::string cmd = "v4l2-ctl -d " + dev + " --get-ctrl=" + ctrl + " 2>/dev/null";
+    FILE* fp = popen(cmd.c_str(), "r");
+    if (!fp) return -1;
+    char buf[128] = {};
+    if (fgets(buf, sizeof(buf), fp) == nullptr) { pclose(fp); return -1; }
+    pclose(fp);
+    const char* p = std::strchr(buf, ':');
+    return p ? std::atoi(p + 1) : -1;
+}
+
+/// Log actual sensor AE state and estimate the resulting FPS.
+static void log_sensor_state(const std::string& sensor_subdev,
+                              const SensorConfig& sen) {
+    int vblank = v4l2_get_ctrl_int(sensor_subdev, "vertical_blanking");
+    int exposure = v4l2_get_ctrl_int(sensor_subdev, "exposure");
+    int gain = v4l2_get_ctrl_int(sensor_subdev, "analogue_gain");
+
+    if (vblank < 0) return;
+
+    int hblank = v4l2_get_ctrl_int(sensor_subdev, "horizontal_blanking");
+    if (hblank < 0) hblank = 600;
+
+    float line_time_us = static_cast<float>(sen.width + hblank) / 81.667f;
+    float frame_time_ms = static_cast<float>(sen.height + vblank) * line_time_us / 1000.0f;
+    float est_fps = 1000.0f / frame_time_ms;
+
+    SC_LOG_INFO("Sensor state: vblank=%d exposure=%d gain=%d → est %.1f fps "
+                "(requested vblank=%d → %.1f fps)",
+                vblank, exposure, gain, est_fps,
+                sen.vblank,
+                1000.0f / (static_cast<float>(sen.height + sen.vblank)
+                           * line_time_us / 1000.0f));
+    if (est_fps < 20.0f && exposure < 200) {
+        SC_LOG_WARN("Sensor FPS low (%.1f) despite short exposure (%d lines). "
+                    "Check RKAIQ IQ file AecFrameRateMode.FpsValue "
+                    "(should be >= 30, not 15).", est_fps, exposure);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ISP configuration: shared media graph (sensor -> ISP input)
 // ---------------------------------------------------------------------------
@@ -88,9 +130,18 @@ static int configure_isp_input(const Config& cfg) {
                        "fmt:" + mbus +
                        " crop:(0,0)/" + sz + " field:none"));
 
-    // 5) Sensor timing (vertical blanking for FPS control)
+    // 5) Sensor timing (vertical blanking for FPS control).
+    //    RKAIQ's AE loop may override this based on AecFrameRateMode.FpsValue
+    //    in the IQ file.  If FpsValue is low (e.g. 15), RKAIQ inflates vblank
+    //    and the camera runs at ~15fps even in bright light.  The fix is to set
+    //    FpsValue >= 43 in the IQ JSON.  We set vblank here anyway as a baseline.
     run_cmd("v4l2-ctl -d " + isp.sensor_subdev +
             " --set-ctrl=vertical_blanking=" + std::to_string(sen.vblank));
+
+    // Log actual sensor state so AE-induced FPS limits are visible at startup
+    run_cmd("v4l2-ctl -d " + isp.sensor_subdev +
+            " --get-ctrl=vertical_blanking,exposure,analogue_gain,auto_exposure"
+            " 2>/dev/null || true");
 
     return 0;
 }
@@ -201,6 +252,9 @@ int isp_configure(const Config& cfg) {
                     cfg.isp.selfpath.c_str(), cfg.ai.width, cfg.ai.height,
                     cfg.ai.src_fmt.c_str());
     }
+
+    // Log sensor timing after full ISP config (RKAIQ may have adjusted vblank)
+    log_sensor_state(cfg.isp.sensor_subdev, cfg.sensor);
 
     return 0;
 }
