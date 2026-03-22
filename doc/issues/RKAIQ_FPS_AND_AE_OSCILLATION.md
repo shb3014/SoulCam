@@ -350,3 +350,41 @@ print('CISMinFps:', iq['sensor_calib']['CISMinFps'])
    restart rkaiq-3a, then start soulcam. Restarting rkaiq while soulcam is
    running corrupts ISP state (`rkisp: no bay3d buffer available`) and can
    cut the RTSP stream.
+
+9. **gst-rtsp-server needs explicit session pool cleanup.** Without
+   periodic calls to `gst_rtsp_session_pool_cleanup()`, disconnected
+   RTSP client sessions accumulate as CLOSE-WAIT sockets. Over hours of
+   operation (repeated connect/disconnect from viewers), this eventually
+   prevents new connections. Fixed by adding a 5-second cleanup timer
+   in `rtsp_server.cpp`. See section 8 below.
+
+---
+
+## 8. RTSP CLOSE-WAIT Socket Leak (long-run stream cutoff)
+
+**Symptom:** After hours of continuous operation with clients
+connecting/disconnecting, the RTSP stream becomes unreachable. ffprobe
+returns "Invalid data found when processing input". soulcam process
+is still running and healthy (41fps, no errors).
+
+**Root cause:** gst-rtsp-server does not automatically call
+`gst_rtsp_session_pool_cleanup()`. Disconnected client sessions remain
+in the pool indefinitely. Each dead session holds a TCP socket in
+CLOSE-WAIT state (remote end sent FIN, local end never called close).
+
+**Evidence (after 9 hours):**
+```
+$ ss -tnp | grep 8554
+CLOSE-WAIT 1  0  192.168.1.45:8554  192.168.1.45:47878  (fd=121)
+CLOSE-WAIT 1  0  192.168.1.45:8554  192.168.1.45:39572  (fd=133)
+... ~30 more CLOSE-WAIT connections
+```
+
+**Fix (`src/pipeline/rtsp_server.cpp`):**
+1. Added `g_timeout_add_seconds(5, rtsp_cleanup_tick, srv)` — calls
+   `gst_rtsp_session_pool_cleanup()` every 5 seconds to remove expired
+   sessions and close their TCP sockets.
+2. Connected to `client-connected` / `closed` signals for diagnostics.
+
+**Verification:** Stress-tested with 10 rapid RTSP connections — zero
+CLOSE-WAIT sockets remain after cleanup cycle.

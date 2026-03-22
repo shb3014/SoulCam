@@ -184,6 +184,36 @@ static void on_rtsp_media_configure(GstRTSPMediaFactory* /*factory*/,
 }
 
 // ---------------------------------------------------------------------------
+// RTSP session & client cleanup
+// ---------------------------------------------------------------------------
+
+static void on_client_closed(GstRTSPClient* /*client*/, gpointer /*user_data*/) {
+    SC_LOG_DEBUG("RTSP client disconnected");
+}
+
+static void on_client_connected(GstRTSPServer* /*server*/,
+                                 GstRTSPClient* client,
+                                 gpointer /*user_data*/) {
+    SC_LOG_INFO("RTSP client connected");
+    g_signal_connect(client, "closed", G_CALLBACK(on_client_closed), nullptr);
+}
+
+static gboolean rtsp_cleanup_tick(gpointer user_data) {
+    auto* srv = static_cast<RtspServer*>(user_data);
+    if (!srv || !srv->server) return G_SOURCE_REMOVE;
+
+    GstRTSPSessionPool* pool = gst_rtsp_server_get_session_pool(srv->server);
+    if (pool) {
+        guint removed = gst_rtsp_session_pool_cleanup(pool);
+        if (removed > 0)
+            SC_LOG_DEBUG("RTSP: cleaned %u expired sessions", removed);
+        g_object_unref(pool);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+// ---------------------------------------------------------------------------
 // RTSP server lifecycle
 // ---------------------------------------------------------------------------
 
@@ -236,6 +266,15 @@ RtspServer* rtsp_server_start(const Config& cfg) {
         overlay_setup_factory(reinterpret_cast<GstElement*>(srv->factory),
                               cfg.stream.width, cfg.stream.height);
     }
+
+    // Track client connect/disconnect for diagnostics
+    g_signal_connect(srv->server, "client-connected",
+                     G_CALLBACK(on_client_connected), srv);
+
+    // Periodic session pool cleanup prevents CLOSE-WAIT socket accumulation.
+    // Without this, disconnected client sessions linger indefinitely and
+    // eventually exhaust connection slots or file descriptors.
+    g_timeout_add_seconds(5, rtsp_cleanup_tick, srv);
 
     // Attach to default GLib main context
     guint id = gst_rtsp_server_attach(srv->server, nullptr);
