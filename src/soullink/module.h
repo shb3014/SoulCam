@@ -41,6 +41,24 @@ public:
         int frame_height,
         const std::string& tracking_mode,
         int raw_count);
+
+    struct PerceptionObject {
+        uint32_t track_id;
+        int cls_id;
+        std::string label;
+        float confidence;
+        int left, top, right, bottom;
+        int object_id;       // -1 if unrecognized
+        std::string name;    // VLM-enriched name
+        float match_conf;
+        float interest;
+        bool tracked;
+    };
+    void submitPerceptions(
+        const std::vector<PerceptionObject>& objects,
+        int frame_width, int frame_height,
+        int total_memory_objects, int active_trackers);
+
     bool isStreamSubscribed() const { return stream_subscribed_.load(); }
 
 private:

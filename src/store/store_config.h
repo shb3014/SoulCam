@@ -61,6 +61,18 @@ namespace SoulCamDp {
         tracker_hand_lost,      // uint32_t  5  (YOLO frames without hand to fallback)
         ai_target_fps,          // uint32_t  0  (0 = unlimited; >0 = cap AI pipeline FPS)
 
+        // Perception pipeline
+        enable_perception,              // bool      false
+        perception_max_tracked,         // uint32_t  5
+        perception_embed_dim,           // uint32_t  128
+        perception_embed_input,         // uint32_t  128
+        perception_hot_tier_max,        // uint32_t  1000
+        perception_interest_novelty_hl, // float     24.0 (hours)
+        perception_interest_motion_w,   // float     0.15
+        perception_interest_threshold,  // float     0.10
+        perception_enrollment_delay,    // uint32_t  5 (frames)
+        perception_vlm_enabled,         // bool      false
+
         VALUE_END,
 
         // String persist keys (offset to avoid binary-format issues in future)
@@ -73,6 +85,14 @@ namespace SoulCamDp {
         rive_file,              // string    ""
         rive_target,            // string    "person"
         model2_labels,          // string    ""  (e.g. "hand")
+
+        // Perception pipeline (string)
+        perception_embedder_model,  // string    ""
+        perception_memory_dir,      // string    "/var/lib/soulcam/memory"
+        perception_vlm_api_url,     // string    ""
+        perception_vlm_api_key,     // string    ""
+        perception_vlm_model,       // string    "gpt-4o"
+
         STRING_END,
 
         PERSIST_END = STRING_END,

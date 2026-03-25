@@ -65,7 +65,32 @@ the full DP metadata list (section 8.4 of `soullink_client.md`).
 | 1002 | `stream_subscribed` | bool | false | SoulFlow has an active `subStream` subscription. |
 | 1003 | `module_ready` | bool | false | Composite: `rtsp_online && frame_receiver_started`. |
 
-**Total: 37 DPs** (26 numeric persist + 8 string persist + 3 RAM)
+## Persist DPs — Perception Pipeline
+
+| DP | Name | Type | Default | Description |
+|---:|------|------|--------:|-------------|
+| 31 | `enable_perception` | bool | false | Enable cascading perception pipeline (multi-object recognition + tracking). |
+| 32 | `perception_max_tracked` | u32 | 5 | Max simultaneous KCF tracker slots (top-K by interest). |
+| 33 | `perception_embed_dim` | u32 | 128 | Embedding vector dimensionality. |
+| 34 | `perception_embed_input` | u32 | 128 | Embedding model square input size (px). |
+| 35 | `perception_hot_tier_max` | u32 | 1000 | Max objects in hot-tier RAM before cold-tier demotion. |
+| 36 | `perception_interest_novelty_hl` | float | 24.0 | Novelty decay half-life in hours. |
+| 37 | `perception_interest_motion_w` | float | 0.15 | Motion weight in interest scoring formula. |
+| 38 | `perception_interest_threshold` | float | 0.10 | Min interest to keep a track alive. |
+| 39 | `perception_enrollment_delay` | u32 | 5 | Frames an object must be stable before enrollment. |
+| 40 | `perception_vlm_enabled` | bool | false | Enable async VLM API enrichment for enrolled objects. |
+
+## Persist DPs — Perception Pipeline (String, offset 100+)
+
+| DP | Name | Type | Default | Description |
+|---:|------|------|---------|-------------|
+| 109 | `perception_embedder_model` | string | `""` | RKNN embedding model path. Empty = stub mode. |
+| 110 | `perception_memory_dir` | string | `"/var/lib/soulcam/memory"` | On-disk directory for object memory bank. |
+| 111 | `perception_vlm_api_url` | string | `""` | VLM API endpoint URL (e.g. OpenAI chat/completions). |
+| 112 | `perception_vlm_api_key` | string | `""` | VLM API authentication key. |
+| 113 | `perception_vlm_model` | string | `"gpt-4o"` | VLM model name passed in API request. |
+
+**Total: 52 DPs** (36 numeric persist + 13 string persist + 3 RAM)
 
 ---
 
@@ -209,3 +234,33 @@ Setting `tracker_yolo_interval = 1` disables the tracker.
 When `tracker_adaptive_interval = true`, the scheduler dynamically decides
 when to run YOLO based on KCF PSR, velocity, and last YOLO confidence,
 bounded by `tracker_min_skip` and `tracker_max_skip`.
+
+### Example: enable perception pipeline from SoulFlow
+
+```
+1. setDp: enable_perception = true
+2. setDp: perception_max_tracked = 3
+3. setDp: perception_embedder_model = "/home/ubuntu/models/mobilenetv3_embed.rknn"
+4. setDp: perception_memory_dir = "/var/lib/soulcam/memory"
+5. sysCmd: 1   (restart to apply)
+```
+
+To add VLM enrichment:
+
+```
+1. setDp: perception_vlm_enabled = true
+2. setDp: perception_vlm_api_url = "https://api.openai.com/v1/chat/completions"
+3. setDp: perception_vlm_api_key = "sk-..."
+4. setDp: perception_vlm_model = "gpt-4o"
+5. sysCmd: 1   (restart to apply)
+```
+
+To tune interest scoring (no restart needed if future hot-reload is added):
+
+```
+1. setDp: perception_interest_novelty_hl = 12.0
+2. setDp: perception_interest_motion_w = 0.25
+3. setDp: perception_interest_threshold = 0.05
+4. setDp: perception_enrollment_delay = 3
+5. sysCmd: 1   (restart to apply)
+```

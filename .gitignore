@@ -7,3 +7,8 @@ device_backups/
 ubuntu-rockchip-2.4.0/
 rockchip-iqfiles-main/
 /models/calib/
+rknn/embedding/.venv
+rknn/embedding/.venv_*
+rknn/embedding/checkpoints
+rknn/embedding/__pycache__
+

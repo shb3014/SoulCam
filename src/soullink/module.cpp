@@ -34,6 +34,7 @@ constexpr int kCmdStreaming = 18;
 constexpr int kCmdDirectorPlay = 20;
 constexpr int kCmdSysCmd = 21;
 constexpr int kMsgAIDetections = 4;
+constexpr int kMsgPerceptions = 5;
 
 static std::string trim_copy(const std::string& s) {
     size_t begin = 0;
@@ -693,6 +694,73 @@ void Module::submitAIDetections(
 
     JsonValue::Object payload;
     payload["id"] = JsonValue(static_cast<int64_t>(kMsgAIDetections));
+    payload["message"] = JsonValue(std::move(message));
+
+    std::lock_guard<std::mutex> lk(ai_detections_mu_);
+    pending_ai_detections_payload_ = JsonValue(std::move(payload));
+    has_pending_ai_detections_ = true;
+}
+
+void Module::submitPerceptions(
+    const std::vector<PerceptionObject>& objects,
+    int frame_width, int frame_height,
+    int total_memory_objects, int active_trackers) {
+    if (!running_) return;
+    if (!stream_subscribed_.load()) return;
+
+    JsonValue::Array rows;
+    rows.reserve(objects.size());
+    for (const auto& po : objects) {
+        JsonValue::Object box;
+        box["left"]   = JsonValue(static_cast<int64_t>(po.left));
+        box["top"]    = JsonValue(static_cast<int64_t>(po.top));
+        box["right"]  = JsonValue(static_cast<int64_t>(po.right));
+        box["bottom"] = JsonValue(static_cast<int64_t>(po.bottom));
+
+        JsonValue::Object obj;
+        obj["trackId"]  = JsonValue(static_cast<int64_t>(po.track_id));
+        obj["clsId"]    = JsonValue(static_cast<int64_t>(po.cls_id));
+        obj["label"]    = JsonValue(po.label);
+        obj["conf"]     = JsonValue(static_cast<double>(po.confidence));
+        obj["box"]      = JsonValue(std::move(box));
+        obj["interest"] = JsonValue(static_cast<double>(po.interest));
+        obj["tracked"]  = JsonValue(po.tracked);
+        obj["model"]    = JsonValue(static_cast<int64_t>(0));
+
+        if (po.object_id >= 0) {
+            JsonValue::Object identity;
+            identity["objectId"]       = JsonValue(static_cast<int64_t>(po.object_id));
+            identity["name"]           = JsonValue(po.name);
+            identity["matchConfidence"] = JsonValue(static_cast<double>(po.match_conf));
+            obj["identity"] = JsonValue(std::move(identity));
+        }
+
+        rows.emplace_back(JsonValue(std::move(obj)));
+    }
+
+    JsonValue::Object frame;
+    frame["width"]  = JsonValue(static_cast<int64_t>(frame_width));
+    frame["height"] = JsonValue(static_cast<int64_t>(frame_height));
+
+    JsonValue::Object tracking;
+    tracking["mode"]    = JsonValue(std::string("perception"));
+    tracking["enabled"] = JsonValue(true);
+
+    JsonValue::Object message;
+    message["schema"]             = JsonValue(std::string("soulcam.perceptions.v1"));
+    message["tsMs"]               = JsonValue(static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()));
+    message["frame"]              = JsonValue(std::move(frame));
+    message["tracking"]           = JsonValue(std::move(tracking));
+    message["rawCount"]           = JsonValue(static_cast<int64_t>(objects.size()));
+    message["count"]              = JsonValue(static_cast<int64_t>(objects.size()));
+    message["objects"]            = JsonValue(std::move(rows));
+    message["totalMemoryObjects"] = JsonValue(static_cast<int64_t>(total_memory_objects));
+    message["activeTrackers"]     = JsonValue(static_cast<int64_t>(active_trackers));
+
+    JsonValue::Object payload;
+    payload["id"]      = JsonValue(static_cast<int64_t>(kMsgPerceptions));
     payload["message"] = JsonValue(std::move(message));
 
     std::lock_guard<std::mutex> lk(ai_detections_mu_);

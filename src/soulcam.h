@@ -142,6 +142,32 @@ struct SoullinkConfig {
 };
 
 // ---------------------------------------------------------------------------
+// Perception pipeline configuration
+// ---------------------------------------------------------------------------
+struct PerceptionPipelineConfig {
+    bool        enabled = false;
+
+    int         max_tracked_objects = 5;
+    std::string embedder_model_path;
+    int         embed_dim    = 128;
+    int         embed_input  = 128;
+
+    std::string memory_dir = "/var/lib/soulcam/memory";
+    int         hot_tier_max = 1000;
+
+    float       interest_novelty_halflife = 24.0f;
+    float       interest_motion_weight    = 0.15f;
+    float       interest_threshold        = 0.10f;
+
+    int         enrollment_delay_frames = 5;
+
+    std::string vlm_api_url;
+    std::string vlm_api_key;
+    std::string vlm_model_name = "gpt-4o";
+    bool        vlm_enabled = false;
+};
+
+// ---------------------------------------------------------------------------
 // Top-level application config
 // ---------------------------------------------------------------------------
 struct Config {
@@ -215,6 +241,9 @@ struct Config {
 
     // Soullink module (native in-process integration).
     SoullinkConfig soullink;
+
+    // Cascading perception pipeline.
+    PerceptionPipelineConfig perception;
 
     // DPs explicitly set via CLI (only these override persisted store values)
     std::set<int> cli_overrides;

@@ -50,6 +50,7 @@
 #include "pipeline/ai_capture.h"
 #include "ai/model_pipeline.h"         // Multi-model pipeline info
 #include "ai/hand_target_tracker.h"    // Single-target hand tracking policy
+#include "ai/perception_engine.h"      // Cascading perception pipeline
 #include "pipeline/overlay.h"          // overlay_update()
 #include "pipeline/rive_renderer.h"    // Rive GPU renderer
 #include "pipeline/onvif_metadata.h"   // ONVIF metadata stream
@@ -294,6 +295,9 @@ static void print_usage(const char* prog) {
         "  --soullink-compat-id     Use compatibility clientId (<serviceIdentifier>, default)\n"
         "  --soullink-composite-id  Use composite clientId (<deviceType>:<serviceIdentifier>)\n"
         "\n"
+        "Perception pipeline:\n"
+        "  (Perception pipeline is configured via SoulLink DPs -- see dp_catalog.md)\n"
+        "\n"
         "General:\n"
         "  -v, --verbose      Verbose logging\n"
         "  -h, --help         Show this help\n"
@@ -386,6 +390,7 @@ static sc::Config parse_args(int argc, char** argv) {
         {"test-weight-high", required_argument, nullptr, 28},
         {"test-weight-low", required_argument, nullptr, 29},
         {"test-no-hand-frames", required_argument, nullptr, 30},
+        // Perception pipeline: configured via DPs, no CLI options
         {"verbose",       no_argument,       nullptr, 'v'},
         {"help",          no_argument,       nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
@@ -459,6 +464,7 @@ static sc::Config parse_args(int argc, char** argv) {
             case 28:  cfg.test_weight_high = atoi(optarg); break;
             case 29:  cfg.test_weight_low = atoi(optarg); break;
             case 30:  cfg.test_no_hand_frames_to_fallback = atoi(optarg); break;
+            // Perception pipeline: configured via DPs (no CLI cases)
             case 'v': cfg.verbose            = true;         ov.insert(DP::verbose);           break;
             case 'h': print_usage(argv[0]); exit(0);
             default:  print_usage(argv[0]); exit(1);
@@ -635,12 +641,47 @@ static void on_detections(const std::vector<sc::Detection>& dets,
     auto* soullink = g_soullink_module.load(std::memory_order_acquire);
     const bool stream_detections_enabled = !soullink || soullink->isStreamSubscribed();
     if (soullink && stream_detections_enabled) {
-        soullink->submitAIDetections(
-            out_rtsp,
-            rtsp_w,
-            rtsp_h,
-            current_tracking_mode(),
-            static_cast<int>(dets.size()));
+        // When perception pipeline is active, submit rich perception data
+        auto* pe = g_ai_for_policy ? sc::ai_capture_get_perception(g_ai_for_policy) : nullptr;
+        if (pe) {
+            const auto& tracks = pe->tracks();
+            std::vector<sc::soullink::Module::PerceptionObject> perc_objs;
+            perc_objs.reserve(tracks.size());
+            for (const auto& t : tracks) {
+                if (t.miss_count > 0) continue;
+                sc::soullink::Module::PerceptionObject po;
+                po.track_id = t.track_id;
+                po.cls_id = t.coarse_class_id;
+                po.label = t.coarse_label;
+                po.confidence = 1.0f;
+                // Project to RTSP coordinates
+                auto proj = [](float v, int in_size, int out_size) -> int {
+                    return static_cast<int>(std::lround(v * out_size / in_size));
+                };
+                po.left   = std::clamp(proj(t.cx - t.w * 0.5f, frame_w, rtsp_w), 0, rtsp_w);
+                po.top    = std::clamp(proj(t.cy - t.h * 0.5f, frame_h, rtsp_h), 0, rtsp_h);
+                po.right  = std::clamp(proj(t.cx + t.w * 0.5f, frame_w, rtsp_w), 0, rtsp_w);
+                po.bottom = std::clamp(proj(t.cy + t.h * 0.5f, frame_h, rtsp_h), 0, rtsp_h);
+                po.object_id = t.memory_object_id;
+                po.match_conf = t.last_match_similarity;
+                po.interest = t.interest_score;
+                po.tracked = t.is_actively_tracked;
+                if (t.memory_object_id >= 0) {
+                    const auto* mem = pe->memory().get(static_cast<uint32_t>(t.memory_object_id));
+                    if (mem) po.name = mem->name;
+                }
+                perc_objs.push_back(std::move(po));
+            }
+            soullink->submitPerceptions(
+                perc_objs, rtsp_w, rtsp_h,
+                pe->memory().total_objects(),
+                0);
+        } else {
+            soullink->submitAIDetections(
+                out_rtsp, rtsp_w, rtsp_h,
+                current_tracking_mode(),
+                static_cast<int>(dets.size()));
+        }
     }
 
     SC_LOG_DEBUG("Detections: raw=%zu tracked=%zu in %dx%d",
@@ -1156,6 +1197,26 @@ static void store_to_config(sc::Config& cfg) {
     if (cfg.tracker_hand_confirm < 1) cfg.tracker_hand_confirm = 1;
     if (cfg.tracker_hand_lost < 1) cfg.tracker_hand_lost = 1;
 
+    // Perception pipeline (DP-only, no CLI)
+    cfg.perception.enabled              = s.get<bool>(enable_perception);
+    cfg.perception.max_tracked_objects  = (int)s.get<uint32_t>(perception_max_tracked);
+    cfg.perception.embed_dim            = (int)s.get<uint32_t>(perception_embed_dim);
+    cfg.perception.embed_input          = (int)s.get<uint32_t>(perception_embed_input);
+    cfg.perception.hot_tier_max         = (int)s.get<uint32_t>(perception_hot_tier_max);
+    cfg.perception.interest_novelty_halflife = s.get<float>(perception_interest_novelty_hl);
+    cfg.perception.interest_motion_weight    = s.get<float>(perception_interest_motion_w);
+    cfg.perception.interest_threshold        = s.get<float>(perception_interest_threshold);
+    cfg.perception.enrollment_delay_frames   = (int)s.get<uint32_t>(perception_enrollment_delay);
+    cfg.perception.vlm_enabled          = s.get<bool>(perception_vlm_enabled);
+    cfg.perception.embedder_model_path  = s.get<std::string>(perception_embedder_model);
+    cfg.perception.memory_dir           = s.get<std::string>(perception_memory_dir);
+    cfg.perception.vlm_api_url          = s.get<std::string>(perception_vlm_api_url);
+    cfg.perception.vlm_api_key          = s.get<std::string>(perception_vlm_api_key);
+    cfg.perception.vlm_model_name       = s.get<std::string>(perception_vlm_model);
+
+    if (cfg.perception.max_tracked_objects < 1) cfg.perception.max_tracked_objects = 1;
+    if (cfg.perception.enrollment_delay_frames < 1) cfg.perception.enrollment_delay_frames = 1;
+
     // Derived / hard-coded (no longer DPs)
     cfg.rtsp.gop              = cfg.stream.fps;
     cfg.rtsp.encoder          = "mpp";
@@ -1220,6 +1281,11 @@ int main(int argc, char** argv) {
                 cfg.test_hand_slot, cfg.test_person_slot,
                 cfg.test_weight_high, cfg.test_weight_low,
                 cfg.test_no_hand_frames_to_fallback);
+    SC_LOG_INFO("Perception pipeline: %s (max_tracked=%d, embedder=%s, vlm=%s)",
+                cfg.perception.enabled ? "enabled" : "disabled",
+                cfg.perception.max_tracked_objects,
+                cfg.perception.embedder_model_path.empty() ? "(stub)" : cfg.perception.embedder_model_path.c_str(),
+                cfg.perception.vlm_enabled ? "enabled" : "disabled");
 
     // --- Set GStreamer plugin path BEFORE gst_init() ---
     // rgaconvert lives in a custom path; GStreamer scans plugins at init time.
@@ -1463,6 +1529,14 @@ int main(int argc, char** argv) {
                         i, info.name.c_str(), info.rknn.model_path.c_str(),
                         info.rknn.conf_threshold, info.skip_frames, info.run_weight);
         }
+        if (cfg.perception.enabled) {
+            auto* pe = sc::ai_capture_get_perception(ai);
+            if (pe) {
+                SC_LOG_INFO("  Perception: cascading pipeline active (max_tracked=%d, memory=%d objects)",
+                            cfg.perception.max_tracked_objects,
+                            pe->memory().total_objects());
+            }
+        }
         if (cfg.enable_overlay) {
             SC_LOG_INFO("  Overlay: detection boxes drawn on RTSP stream");
         }
@@ -1524,8 +1598,8 @@ int main(int argc, char** argv) {
     sc::onvif_device_stop(onvif_dev);
     sc::onvif_stream_stop(g_onvif);
     g_onvif = nullptr;
-    sc::ai_capture_stop(ai);
     g_ai_for_policy = nullptr;
+    sc::ai_capture_stop(ai);
     scene_hub_close();
     sc::rtsp_server_stop(rtsp);
 

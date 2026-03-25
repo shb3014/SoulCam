@@ -67,6 +67,16 @@ else()
     message(STATUS "Cairo not found -- overlay disabled (install libcairo2-dev)")
 endif()
 
+# libcurl (optional, for VLM API integration)
+pkg_check_modules(CURL libcurl)
+if(CURL_FOUND)
+    set(HAVE_CURL TRUE)
+    message(STATUS "libcurl found: VLM API support enabled")
+else()
+    set(HAVE_CURL FALSE)
+    message(STATUS "libcurl not found -- VLM enrichment will use stub mode")
+endif()
+
 # OpenCV (optional, for debug/visualization only)
 find_package(OpenCV QUIET)
 if(OpenCV_FOUND)
@@ -138,6 +148,15 @@ set(SOULCAM_SOURCES
     ai/hand_target_tracker.cpp
     ai/interframe_tracker.cpp
     ai/model_pipeline.cpp
+    ai/multi_object_associator.cpp
+    ai/tracker_pool.cpp
+    ai/crop_extractor.cpp
+    ai/embedder.cpp
+    ai/embedding_queue.cpp
+    ai/object_memory.cpp
+    ai/interest_scorer.cpp
+    ai/vlm_client.cpp
+    ai/perception_engine.cpp
     util/logger.cpp
 )
 
@@ -179,6 +198,12 @@ if(HAVE_CAIRO)
     target_include_directories(soulcam PRIVATE ${CAIRO_INCLUDE_DIRS})
     target_link_libraries(soulcam PRIVATE ${CAIRO_LIBRARIES})
     target_compile_definitions(soulcam PRIVATE SOULCAM_HAVE_CAIRO=1)
+endif()
+
+if(HAVE_CURL)
+    target_include_directories(soulcam PRIVATE ${CURL_INCLUDE_DIRS})
+    target_link_libraries(soulcam PRIVATE ${CURL_LIBRARIES})
+    target_compile_definitions(soulcam PRIVATE SOULCAM_HAVE_CURL=1)
 endif()
 
 if(HAVE_OPENCV)

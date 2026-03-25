@@ -22,6 +22,7 @@
 #include "pipeline/ai_capture.h"
 #include "ai/model_pipeline.h"
 #include "ai/interframe_tracker.h"
+#include "ai/perception_engine.h"
 #include "util/logger.h"
 
 #include <gst/gst.h>
@@ -34,12 +35,35 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <unordered_map>
+#include <memory>
+#include <mutex>
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 #endif
 
 namespace sc {
+
+namespace {
+
+// Convert transient std::string labels from perception objects into
+// process-lifetime C-string pointers used by legacy Detection consumers.
+const char* intern_label(const std::string& label) {
+    static std::mutex mtx;
+    static std::unordered_map<std::string, std::unique_ptr<std::string>> pool;
+    std::lock_guard<std::mutex> lk(mtx);
+    auto it = pool.find(label);
+    if (it != pool.end()) {
+        return it->second->c_str();
+    }
+    auto owned = std::make_unique<std::string>(label);
+    const char* cstr = owned->c_str();
+    pool.emplace(label, std::move(owned));
+    return cstr;
+}
+
+}  // namespace
 
 struct AiCapture {
     GstElement*     pipeline = nullptr;
@@ -92,6 +116,9 @@ struct AiCapture {
     uint32_t fps_cam_frames   = 0;  // raw camera delivery count (before throttle)
 
     AiCallback      callback;
+
+    // Perception engine (cascading pipeline, optional)
+    PerceptionEngine* perception = nullptr;
 
     int width  = 640;
     int height = 480;
@@ -446,8 +473,83 @@ static GstFlowReturn on_new_sample(GstAppSink* sink, gpointer user_data) {
         cap->has_frame_time = true;
     }
 
-    if (run_yolo && cap->model_pipe) {
-        // Letterbox camera frame to model input size
+    // --- Perception pipeline path ---
+    if (cap->perception) {
+        const int npix = cap->cap_w * cap->cap_h;
+        cap->gray_buf.resize(npix);
+        rgb_to_gray(map.data, cap->gray_buf.data(), cap->cap_w, cap->cap_h);
+
+        if (run_yolo && cap->model_pipe) {
+            const uint8_t* infer_data = map.data;
+            int infer_w = cap->cap_w;
+            int infer_h = cap->cap_h;
+            if (cap->lb_pad_top > 0) {
+                letterbox_pad(map.data, cap->cap_w, cap->cap_h,
+                              cap->lb_buf.data(), cap->model_w, cap->model_h,
+                              cap->lb_pad_top);
+                infer_data = cap->lb_buf.data();
+                infer_w = cap->model_w;
+                infer_h = cap->model_h;
+            }
+
+            std::vector<Detection> detections;
+            int rc = model_pipeline_infer(cap->model_pipe,
+                                           infer_data, infer_w * infer_h * 3,
+                                           infer_w, infer_h, 3,
+                                           detections);
+            if (rc == 0) {
+                if (cap->lb_pad_top > 0)
+                    unletterbox_detections(detections, cap->lb_pad_top, cap->cap_h);
+
+                cap->frames_since_yolo = 0;
+
+                PerceptionFrame pf = cap->perception->process_yolo_frame(
+                    map.data, cap->gray_buf.data(),
+                    cap->cap_w, cap->cap_h,
+                    detections, frame_dt);
+
+                // Bridge: convert PerceptionFrame to legacy Detection callback
+                if (cap->callback) {
+                    std::vector<Detection> legacy_dets;
+                    for (const auto& po : pf.objects) {
+                        Detection d{};
+                        d.cls_id = po.cls_id;
+                        d.label = intern_label(po.cls_label);
+                        d.confidence = po.confidence;
+                        d.left = po.left;
+                        d.top = po.top;
+                        d.right = po.right;
+                        d.bottom = po.bottom;
+                        legacy_dets.push_back(d);
+                    }
+                    cap->callback(legacy_dets, cap->cap_w, cap->cap_h);
+                }
+            }
+        } else {
+            cap->frames_since_yolo++;
+
+            PerceptionFrame pf = cap->perception->process_tracker_frame(
+                cap->gray_buf.data(), cap->cap_w, cap->cap_h, frame_dt);
+
+            if (cap->callback) {
+                std::vector<Detection> legacy_dets;
+                for (const auto& po : pf.objects) {
+                    Detection d{};
+                    d.cls_id = po.cls_id;
+                    d.label = intern_label(po.cls_label);
+                    d.confidence = po.confidence;
+                    d.left = po.left;
+                    d.top = po.top;
+                    d.right = po.right;
+                    d.bottom = po.bottom;
+                    legacy_dets.push_back(d);
+                }
+                cap->callback(legacy_dets, cap->cap_w, cap->cap_h);
+            }
+        }
+    }
+    // --- Legacy single-target path ---
+    else if (run_yolo && cap->model_pipe) {
         const uint8_t* infer_data = map.data;
         int infer_w = cap->cap_w;
         int infer_h = cap->cap_h;
@@ -656,6 +758,37 @@ AiCapture* ai_capture_start(const Config& cfg, AiCallback cb) {
         SC_LOG_INFO("AI pipeline target FPS: %d", cfg.ai_target_fps);
     }
 
+    // Perception pipeline (cascading multi-object pipeline)
+    if (cfg.perception.enabled) {
+        PerceptionConfig pcfg;
+        pcfg.enabled = true;
+        pcfg.max_tracked_objects = cfg.perception.max_tracked_objects;
+
+        pcfg.embedder.model_path = cfg.perception.embedder_model_path;
+        pcfg.embedder.embed_dim  = cfg.perception.embed_dim;
+        pcfg.embedder.input_size = cfg.perception.embed_input;
+
+        pcfg.memory.storage_dir   = cfg.perception.memory_dir;
+        pcfg.memory.hot_tier_max  = cfg.perception.hot_tier_max;
+
+        pcfg.interest.novelty_halflife_hours = cfg.perception.interest_novelty_halflife;
+        pcfg.interest.motion_weight          = cfg.perception.interest_motion_weight;
+        pcfg.interest.min_interest           = cfg.perception.interest_threshold;
+
+        pcfg.associator.enrollment_delay_frames = cfg.perception.enrollment_delay_frames;
+
+        pcfg.vlm.api_url    = cfg.perception.vlm_api_url;
+        pcfg.vlm.api_key    = cfg.perception.vlm_api_key;
+        pcfg.vlm.model_name = cfg.perception.vlm_model_name;
+        pcfg.vlm.enabled    = cfg.perception.vlm_enabled;
+
+        pcfg.tracker = make_tracker_config(cfg);
+
+        cap->perception = new PerceptionEngine(pcfg);
+        SC_LOG_INFO("Perception pipeline enabled: max_tracked=%d",
+                    cfg.perception.max_tracked_objects);
+    }
+
     // Unified target policy (hand-preferred / person-fallback)
     cap->target.enabled = cfg.test_adaptive_hand_person;
     cap->target.hand_slot = cfg.test_hand_slot;
@@ -735,6 +868,13 @@ void ai_capture_stop(AiCapture* cap) {
 
     SC_LOG_INFO("Stopping AI capture...");
 
+    // Prevent shutdown-time callbacks from touching external teardown state.
+    cap->callback = nullptr;
+    if (cap->appsink) {
+        GstAppSinkCallbacks callbacks = {};
+        gst_app_sink_set_callbacks(GST_APP_SINK(cap->appsink), &callbacks, nullptr, nullptr);
+    }
+
     if (cap->loop && g_main_loop_is_running(cap->loop)) {
         g_main_loop_quit(cap->loop);
     }
@@ -748,6 +888,7 @@ void ai_capture_stop(AiCapture* cap) {
     if (cap->context) g_main_context_unref(cap->context);
 
     model_pipeline_destroy(cap->model_pipe);
+    delete cap->perception;
     delete cap->tracker;
     delete cap;
 
@@ -891,6 +1032,11 @@ int ai_capture_get_target_slot(AiCapture* cap) {
     if (!cap || !cap->target.enabled) return -1;
     return (cap->target.mode == TargetMode::HandPreferred)
         ? cap->target.hand_slot : cap->target.person_slot;
+}
+
+PerceptionEngine* ai_capture_get_perception(AiCapture* cap) {
+    if (!cap) return nullptr;
+    return cap->perception;
 }
 
 }  // namespace sc

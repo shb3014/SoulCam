@@ -232,12 +232,14 @@ ModelPipeline* model_pipeline_create(const RknnConfig& primary_cfg,
 
 void model_pipeline_destroy(ModelPipeline* mp) {
     if (!mp) return;
-    std::lock_guard<std::mutex> lock(mp->mtx);
-    for (auto& slot : mp->slots) {
-        detector_destroy(slot.detector);
-        slot.detector = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mp->mtx);
+        for (auto& slot : mp->slots) {
+            detector_destroy(slot.detector);
+            slot.detector = nullptr;
+        }
+        mp->slots.clear();
     }
-    mp->slots.clear();
     delete mp;
     SC_LOG_INFO("ModelPipeline: destroyed");
 }

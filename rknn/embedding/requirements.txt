@@ -1,0 +1,14 @@
+# Training & export (x86 host with GPU)
+torch>=2.0
+torchvision>=0.15
+onnx>=1.14
+onnxruntime>=1.15
+Pillow>=9.0
+numpy>=1.24
+
+# RKNN conversion (x86 Linux only)
+# Install separately: pip install rknn-toolkit2
+# See: https://github.com/airockchip/rknn-toolkit2
+
+# On-device validation (RK3566 ARM64)
+# Install separately: pip3 install rknnlite2

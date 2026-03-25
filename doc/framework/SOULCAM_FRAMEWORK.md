@@ -14,32 +14,81 @@ fully hardware-accelerated pipeline.
 ### Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│            ISP (rkisp v21, RKAIQ 3A)         │
-│  OV5647 → CSI → ISP Processing (AWB,AE,CCM) │
-├────────────────┬─────────────────────────────┤
-│  mainpath      │  selfpath                   │
-│  /dev/video8   │  /dev/video9                │
-│  1280x960 NV12 │  640x480 NV12               │
-└────────┬───────┴────────────┬────────────────┘
-         │                    │
-         ▼                    ▼
-  ┌──────────────┐    ┌──────────────┐
-  │ MPP (HW)     │    │ RGA 2D (HW)  │
-  │ NV12 → H.264 │    │ NV12 → RGB   │
-  └──────┬───────┘    └──────┬───────┘
-         │                   │
-         ▼                   ▼
-  ┌──────────────┐    ┌──────────────┐
-  │ RTSP Server  │    │ RKNN NPU     │
-  │ :8554/cam    │    │ YOLOv8       │
-  └──────────────┘    └──────┬───────┘
-                             │
-                             ▼
-                      ┌──────────────┐
-                      │ Scene Hub    │
-                      │ (detections) │
-                      └──────────────┘
+┌──────────────────────────────────────────────────────┐
+│              ISP (rkisp v21, RKAIQ 3A)               │
+│  OV5647 → CSI → ISP Processing (AWB,AE,CCM)         │
+├──────────────────┬───────────────────────────────────┤
+│  mainpath        │  selfpath                         │
+│  /dev/video8     │  /dev/video9                      │
+│  1280x960 NV12   │  640x480 NV12                     │
+└────────┬─────────┴──────────────┬────────────────────┘
+         │                        │
+         ▼                        ▼
+  ┌──────────────┐         ┌──────────────┐
+  │ MPP (HW)     │         │ RGA 2D (HW)  │
+  │ NV12 → H.264 │         │ NV12 → RGB   │
+  └──────┬───────┘         └──────┬───────┘
+         │                        │
+         ▼                        ▼
+  ┌──────────────┐         ┌─────────────────────────────────────────┐
+  │ RTSP Server  │         │          AI Capture Pipeline            │
+  │ :8554/cam    │         │                                         │
+  └──────────────┘         │  ┌───────────────────────────────────┐  │
+                           │  │    RKNN NPU: YOLOv8 (detection)   │  │
+                           │  └───────────────┬───────────────────┘  │
+                           │                  │                      │
+                           │    ┌─────────────▼────────────────┐     │
+                           │    │    Perception Engine          │     │
+                           │    │                               │     │
+                           │    │  ┌─────────────────────────┐  │     │
+                           │    │  │ Multi-Object Associator │  │     │
+                           │    │  │ (IoU track assignment)  │  │     │
+                           │    │  └───────────┬─────────────┘  │     │
+                           │    │              │                │     │
+                           │    │  ┌───────────▼─────────────┐  │     │
+                           │    │  │ Crop Extractor          │  │     │
+                           │    │  │ (quality-scored crops)   │  │     │
+                           │    │  └───────────┬─────────────┘  │     │
+                           │    │              │                │     │
+                           │    │  ┌───────────▼─────────────┐  │     │
+                           │    │  │ Embedding Queue (NPU)   │  │     │
+                           │    │  │ interleaved scheduling  │  │     │
+                           │    │  └───────────┬─────────────┘  │     │
+                           │    │              │                │     │
+                           │    │  ┌───────────▼─────────────┐  │     │
+                           │    │  │ Object Memory Bank      │  │     │
+                           │    │  │ (match / enroll / evolve)│  │     │
+                           │    │  └───────────┬─────────────┘  │     │
+                           │    │              │                │     │
+                           │    │  ┌───────────▼─────────────┐  │     │
+                           │    │  │ Interest Scorer         │  │     │
+                           │    │  │ (novelty+motion+VLM)    │  │     │
+                           │    │  └───────────┬─────────────┘  │     │
+                           │    │              │                │     │
+                           │    │  ┌───────────▼─────────────┐  │     │
+                           │    │  │ KCF Tracker Pool (K)    │  │     │
+                           │    │  │ (top-K active tracking) │  │     │
+                           │    │  └─────────────────────────┘  │     │
+                           │    │                               │     │
+                           │    │  ┌─────────────────────────┐  │     │
+                           │    │  │ VLM Client (async)      │──┼──→ Cloud API
+                           │    │  │ (semantic enrichment)   │  │     │
+                           │    │  └─────────────────────────┘  │     │
+                           │    └───────────────┬──────────────┘     │
+                           └────────────────────┼────────────────────┘
+                                                │
+                                                ▼
+                           ┌────────────────────────────────────┐
+                           │  SoulLink (MQTT)                   │
+                           │  soulcam.perceptions.v1            │
+                           │  (identity, interest, tracking)    │
+                           └────────────────┬───────────────────┘
+                                            │
+                                            ▼
+                           ┌────────────────────────────────────┐
+                           │  SoulFlow UI                       │
+                           │  (interest coloring, memory view)  │
+                           └────────────────────────────────────┘
 ```
 
 ### Why dual-path ISP?
@@ -73,13 +122,13 @@ signaling (TCP session management).
 
 ```
 src/
-├── CMakeLists.txt              # Build (GStreamer + RKNN + optional OpenCV)
-├── soulcam.h                   # Config types (IspDevices, StreamConfig, etc.)
+├── CMakeLists.txt              # Build (GStreamer + RKNN + optional OpenCV + optional libcurl)
+├── soulcam.h                   # Config types (IspDevices, StreamConfig, PerceptionPipelineConfig, etc.)
 ├── main.cpp                    # Entry point, CLI args, orchestration, control socket
 ├── pipeline/
 │   ├── isp_config.h/.cpp       # ISP dual-path setup (media-ctl + v4l2-ctl)
 │   ├── rtsp_server.h/.cpp      # GstRtspServer (HW: RGA + MPP)
-│   ├── ai_capture.h/.cpp       # Selfpath capture → appsink → multi-model RKNN
+│   ├── ai_capture.h/.cpp       # Selfpath capture → appsink → multi-model RKNN + perception
 │   ├── overlay.h/.cpp          # Cairo detection overlay on RTSP stream
 │   ├── onvif_metadata.h/.cpp   # ONVIF analytics metadata RTSP stream
 │   ├── onvif_device.h/.cpp     # ONVIF device service (WS-Discovery + SOAP)
@@ -87,7 +136,25 @@ src/
 │   └── tuya_ipc.h/.cpp         # Tuya IPC SDK adapter (stub when no SDK)
 ├── ai/
 │   ├── detector.h/.cpp         # RKNN model wrapper (with stub for x86)
-│   └── model_pipeline.h/.cpp   # Multi-model orchestrator (N models on same frame)
+│   ├── model_pipeline.h/.cpp   # Multi-model orchestrator (N models on same frame)
+│   ├── hand_target_tracker.h/.cpp  # Single-target hand/person tracker (legacy)
+│   ├── interframe_tracker.h/.cpp   # KCF + Kalman interframe tracker
+│   ├── multi_object_associator.h/.cpp  # IoU-based multi-object detection association
+│   ├── tracker_pool.h/.cpp     # K-slot KCF tracker pool (top-K interest tracking)
+│   ├── crop_extractor.h/.cpp   # Quality-scored crop extraction per track
+│   ├── embedder.h/.cpp         # Lightweight CNN embedding on NPU (128-D L2-normalized)
+│   ├── embedding_queue.h/.cpp  # Priority queue for interleaved NPU embedding
+│   ├── object_memory.h/.cpp    # Persistent unbounded object memory bank
+│   ├── interest_scorer.h/.cpp  # Composite interest scoring (novelty+motion+VLM)
+│   ├── vlm_client.h/.cpp       # Async cloud VLM API for semantic enrichment
+│   └── perception_engine.h/.cpp # Cascading pipeline orchestrator (ties everything together)
+├── soullink/
+│   ├── module.h/.cpp           # SoulLink MQTT module (perceptions.v1 schema)
+│   ├── sync_engine.h/.cpp      # Git-based file sync
+│   └── json.h/.cpp             # Lightweight JSON builder
+├── store/
+│   ├── store.h/.cpp            # DP-based persistent configuration
+│   └── store_config.h/.cpp     # DP catalog and defaults
 └── util/
     └── logger.h/.cpp           # Timestamped logging
 ```
@@ -174,6 +241,24 @@ bash scripts/build.sh clean     # Clean + rebuild
     --model3 rk3566/yolov8m.rknn --model3-skip 4
 ```
 
+### RTSP + AI + Perception Pipeline
+
+Perception is configured via DPs, not CLI flags. Enable it from SoulFlow
+or by editing `store.json` directly:
+
+```bash
+# On device: edit store.json to enable perception
+sudo nano /var/lib/soulcam/store.json
+# Add: "enable_perception": true
+
+# Or via MQTT setDp:
+mosquitto_pub -h 127.0.0.1 -t 'soulcam/debug/in/<id>' \
+  -m '{"cmd":0,"data":[{"dp":31,"value":true}]}'
+
+# Then restart:
+sudo systemctl restart soulcam
+```
+
 ### Custom resolution / bitrate
 
 ```bash
@@ -231,6 +316,9 @@ Performance options:
 
 Runtime control:
   --ctrl-sock PATH   Control socket      (default: /tmp/soulcam_ctrl.sock)
+
+Perception pipeline:
+  (configured via SoulLink DPs -- see soullink/docs/dp_catalog.md)
 
 General:
   -v, --verbose      Verbose logging
@@ -324,6 +412,8 @@ tail -f /tmp/soulcam.log
 | `rgaconvert` plugin | custom build | NV12→RGB RGA conversion (AI + overlay paths) |
 | `librga2` | 2.2.0 | RGA 2D engine userspace |
 | `librknnrt.so` | (from rknn/) | RKNN NPU runtime |
+| `libmosquitto-dev` | 2.0.x | MQTT client for SoulLink |
+| `libcurl` | (optional) | VLM API HTTP client (stub without) |
 | `cmake` | 3.28.3 | Build system |
 
 ### GStreamer plugin locations
@@ -713,6 +803,140 @@ each detection:
 
 ---
 
+## Cascading Perception Pipeline (added 2026-03-20)
+
+Unbounded object recognition system that identifies everything the camera has
+ever seen and dynamically tracks the most interesting objects. Enabled with the
+`--perception` flag.
+
+### Design principles
+
+1. **Cascading**: cheap recognition on every object; expensive tracking on the
+   interesting few (top-K). Recognition is unbounded; tracking is bounded.
+2. **Non-parametric learning**: object memory grows by accumulating multi-view
+   embeddings and updating centroids -- no on-device neural network retraining.
+3. **Interleaved NPU**: embedding inference runs on tracker frames (when the
+   NPU is idle between YOLO frames), maximizing hardware utilization.
+4. **VLM-enriched semantics**: a cloud Vision-Language Model provides rich
+   labels, descriptions, and a `base_interest` signal asynchronously.
+
+### Pipeline flow (per frame)
+
+```
+YOLO frame (every N-th):
+  detections → MultiObjectAssociator → CropExtractor → ObjectMemory.match()
+    → try_enroll() → InterestScorer → TrackerPool.assign(top-K)
+    → EmbeddingQueue.push()  [deferred to tracker frames]
+
+Tracker frame (interleaved):
+  TrackerPool.update_all()   → KCF + Kalman update for active tracks
+  EmbeddingQueue.process_one() → NPU embedding for next queued crop
+```
+
+### Components
+
+| Module | File | Purpose |
+|--------|------|---------|
+| Multi-Object Associator | `ai/multi_object_associator.h/.cpp` | IoU-based detection-to-track association; manages persistent `TrackSlot` table |
+| KCF Tracker Pool | `ai/tracker_pool.h/.cpp` | K configurable tracker instances; assigns slots by interest rank |
+| Crop Extractor | `ai/crop_extractor.h/.cpp` | Extracts bounding-box crops, quality-scores (size, blur, truncation), ring-buffer per track |
+| Embedder | `ai/embedder.h/.cpp` | Lightweight CNN on NPU → 128-D L2-normalized feature vector; NEON-optimized normalization |
+| Embedding Queue | `ai/embedding_queue.h/.cpp` | Thread-safe priority queue; processed interleaved on tracker frames |
+| Object Memory | `ai/object_memory.h/.cpp` | Unbounded persistent memory bank; centroid + exemplar embeddings; tiered hot/cold storage; cosine-similarity matching |
+| Interest Scorer | `ai/interest_scorer.h/.cpp` | Composite score: novelty, motion, size, uncertainty, appearance change, VLM `base_interest`, frequency decay |
+| VLM Client | `ai/vlm_client.h/.cpp` | Async background thread; sends crops to cloud API; returns name, description, attributes, `base_interest` |
+| Perception Engine | `ai/perception_engine.h/.cpp` | Orchestrator; wires all components; called from `ai_capture.cpp` |
+
+### TrackSlot lifecycle
+
+```
+Detection → New TrackSlot (Active)
+  │  IoU match on subsequent frames increments age, resets miss_count
+  │  CropExtractor stores quality-scored crops in ring buffer
+  │  EmbeddingQueue extracts 128-D embedding on a tracker frame
+  │
+  ├─ ObjectMemory.match() → Confident → memory_object_id set → Enrolled
+  │     └─ observe() updates centroid, adds novel exemplars
+  │
+  └─ No match after N stable frames → enroll() → new ObjectRecord
+       └─ VLM enrichment queued → name, description, base_interest populated
+```
+
+### Interest scoring
+
+The composite interest score determines resource allocation:
+
+```
+interest = w_novelty * novelty_signal
+         + w_motion  * normalized_velocity
+         + w_size    * normalized_area
+         + w_uncertainty * (1 - match_confidence)
+         + w_change  * embedding_delta_from_memory
+         + base_interest (from VLM)
+         - frequency_decay * log(1 + seen_count)
+```
+
+Objects scoring above `min_interest` are kept alive. The top-K by interest
+get active KCF tracker slots. Embedding extraction also follows interest
+priority (higher-interest crops processed first).
+
+### SoulLink integration
+
+Perception data is published via MQTT using the `soulcam.perceptions.v1`
+schema (message id=5):
+
+```json
+{"schema":"soulcam.perceptions.v1","fw":640,"fh":480,
+ "total_mem":42,"active_trk":3,
+ "objects":[
+   {"trackId":7,"clsId":0,"label":"person","conf":0.89,
+    "box":[0.2,0.1,0.5,0.9],
+    "identity":{"objectId":12,"name":"Gordon","matchConf":0.93},
+    "interest":0.73,"tracked":true},
+   ...
+ ]}
+```
+
+### SoulFlow UI
+
+The SoulFlow `DebugRtspNode` component renders perception overlays:
+- **Border color**: green-to-red gradient based on interest score
+- **Border width**: thick dashed for actively tracked; thin for passive
+- **Label**: VLM-assigned name, interest badge (e.g. "★73"), tracking icon (⟐)
+- **Status bar**: `obj:<count> mem:<total> trk:<active>`
+
+### Configuration (DP-only, no CLI flags)
+
+The perception pipeline is configured exclusively through the SoulLink DP system
+(`setDp` over MQTT or `store.json`). There are no CLI flags -- this follows the
+same pattern as the interframe tracker.
+
+| DP | Name | Type | Default | Description |
+|---:|------|------|--------:|-------------|
+| 31 | `enable_perception` | bool | false | Master switch |
+| 32 | `perception_max_tracked` | u32 | 5 | Top-K active KCF tracker slots |
+| 33 | `perception_embed_dim` | u32 | 128 | Embedding vector size |
+| 34 | `perception_embed_input` | u32 | 128 | Model input size (px) |
+| 36 | `perception_interest_novelty_hl` | float | 24.0 | Novelty half-life (hours) |
+| 37 | `perception_interest_motion_w` | float | 0.15 | Motion weight |
+| 38 | `perception_interest_threshold` | float | 0.10 | Min interest to keep alive |
+| 40 | `perception_vlm_enabled` | bool | false | Enable VLM enrichment |
+| 109 | `perception_embedder_model` | string | `""` | RKNN model path (stub if empty) |
+| 110 | `perception_memory_dir` | string | `"/var/lib/soulcam/memory"` | Memory bank dir |
+| 111 | `perception_vlm_api_url` | string | `""` | VLM API endpoint |
+| 112 | `perception_vlm_api_key` | string | `""` | VLM API key |
+| 113 | `perception_vlm_model` | string | `"gpt-4o"` | VLM model name |
+
+See `soullink/docs/dp_catalog.md` for the full DP reference and SoulFlow examples.
+
+### Optional dependencies
+
+- **libcurl** (`libcurl-dev`): Required for real VLM API calls. Without it,
+  VLM runs in stub mode (generates placeholder labels from coarse class).
+  Auto-detected by CMake.
+
+---
+
 ## Systemd Services
 
 ### `soulcam.service`
@@ -889,9 +1113,46 @@ curl http://192.168.1.45:8080/
       with skip=0,2,4. CPU ~10%, memory ~101 MB. Sequential NPU execution
       with no pipeline restart needed for model changes.
 
+- [x] Cascading perception pipeline (2026-03-20): Full multi-object recognition
+      and tracking system integrated into ai_capture. Nine new C++ modules:
+      1. **Multi-object associator** (`ai/multi_object_associator.cpp`): IoU-based
+         detection-to-track association with persistent TrackSlot table.
+      2. **KCF tracker pool** (`ai/tracker_pool.cpp`): K configurable tracker
+         instances assigned by interest rank.
+      3. **Crop extractor** (`ai/crop_extractor.cpp`): Quality-scored crop extraction
+         per track with ring-buffer storage.
+      4. **Embedder** (`ai/embedder.cpp`): 128-D L2-normalized visual embeddings on
+         NPU via RKNN, with NEON-optimized vector ops. Stub mode when no model.
+      5. **Embedding queue** (`ai/embedding_queue.cpp`): Priority queue for interleaved
+         NPU scheduling -- embeddings extracted on tracker frames when NPU is idle.
+      6. **Object memory bank** (`ai/object_memory.cpp`): Unbounded persistent memory
+         with centroid + exemplar embeddings, cosine-similarity matching, tiered
+         hot/cold storage, and disk persistence.
+      7. **Interest scorer** (`ai/interest_scorer.cpp`): Composite scoring (novelty,
+         motion, size, uncertainty, appearance change, VLM base_interest, frequency
+         decay) drives tracking slot allocation.
+      8. **VLM client** (`ai/vlm_client.cpp`): Async cloud API enrichment for semantic
+         labels, descriptions, and base_interest. Stub mode without libcurl.
+      9. **Perception engine** (`ai/perception_engine.cpp`): Orchestrator wiring all
+         components; called from ai_capture on YOLO and tracker frames.
+      Additionally: SoulLink `soulcam.perceptions.v1` schema for MQTT publication,
+      SoulFlow UI overlay updates (interest-based coloring, identity labels, memory
+      status). Build system updated for optional libcurl dependency.
+
 ## Next Steps
 
-### Priority 1: Future Enhancements
+### Priority 1: Perception Pipeline Tuning
+
+1. **Train/deploy embedding model**: Export a MobileNetV3-Small or similar
+   lightweight re-ID model to RKNN format for real (non-stub) embeddings.
+2. **VLM API integration**: Install libcurl on device, configure VLM endpoint
+   for real semantic enrichment instead of stub labels.
+3. **Memory persistence**: Implement full JSON load/save for ObjectMemory
+   (currently save-only; load is a stub awaiting a JSON parser).
+4. **Cold-tier storage**: Implement disk-backed cold tier for objects not seen
+   in >30 days, with on-demand loading per coarse class.
+
+### Priority 2: Future Enhancements
 
 1. **Cascade model pipeline**: Chain model outputs (e.g., person detection
    → face crop → face recognition). Currently all models see the full
@@ -904,22 +1165,8 @@ curl http://192.168.1.45:8080/
   development planned (authentication, etc.) unless specifically needed.
 
 - **Tuya IPC SDK Integration** (target: Alexa / Google / HomeKit):
-  Original goal was to connect to Tuya IoT Cloud for streaming to Amazon
-  Alexa (Echo Show), Google Assistant (Chromecast), and Apple HomeKit.
   See `doc/tuya/TUYA_INTEGRATION_PLAN.md` for the full integration plan.
 
   Completed preparatory work:
-  - **JPEG snapshot endpoint** *(completed 2026-02-12)*: Single-frame JPEG
-    capture from ISP selfpath. HTTP `GET /snapshot` on port 8088. Enable
-    with `--snapshot` flag.
-  - **Tuya adapter layer** *(completed 2026-02-12)*: Skeleton module
-    (`pipeline/tuya_ipc.h/.cpp`) with interfaces for Tuya IPC SDK integration.
-    Not linked to actual Tuya SDK (requires SDK binaries from Tuya Developer
-    Platform).
-
-  Remaining work (if needed):
-  - Tuya Cloud setup (register on platform, get credentials)
-  - H.264 frame tap + Tuya ring buffer integration
-  - AI event → Tuya notification bridge
-  - Audio support (ALSA → AAC/PCM for two-way audio)
-  - Local SD card recording (Tuya `tuya_ipc_ss_*` APIs)
+  - **JPEG snapshot endpoint** *(completed 2026-02-12)*
+  - **Tuya adapter layer** *(completed 2026-02-12)*

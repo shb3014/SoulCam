@@ -92,4 +92,8 @@ bool ai_capture_target_policy_enabled(AiCapture* cap);
 TargetMode ai_capture_get_target_mode(AiCapture* cap);
 int  ai_capture_get_target_slot(AiCapture* cap);
 
+// Perception engine access (returns nullptr if perception pipeline is disabled).
+class PerceptionEngine;
+PerceptionEngine* ai_capture_get_perception(AiCapture* cap);
+
 }  // namespace sc

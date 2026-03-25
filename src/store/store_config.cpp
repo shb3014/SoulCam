@@ -48,6 +48,18 @@ std::unordered_map<int, StateType> getDefaultValueMap() {
         {tracker_hand_lost,       (uint32_t)5},
         {ai_target_fps,           (uint32_t)0},
 
+        // Perception pipeline
+        {enable_perception,             false},
+        {perception_max_tracked,        (uint32_t)5},
+        {perception_embed_dim,          (uint32_t)128},
+        {perception_embed_input,        (uint32_t)128},
+        {perception_hot_tier_max,       (uint32_t)1000},
+        {perception_interest_novelty_hl, 24.0f},
+        {perception_interest_motion_w,   0.15f},
+        {perception_interest_threshold,  0.10f},
+        {perception_enrollment_delay,    (uint32_t)5},
+        {perception_vlm_enabled,         false},
+
         // Strings
         {rtsp_mount,            std::string("/cam")},
         {ai_model_path,         std::string("")},
@@ -57,6 +69,13 @@ std::unordered_map<int, StateType> getDefaultValueMap() {
         {rive_file,             std::string("")},
         {rive_target,           std::string("person")},
         {model2_labels,         std::string("")},
+
+        // Perception pipeline (string)
+        {perception_embedder_model, std::string("")},
+        {perception_memory_dir,     std::string("/var/lib/soulcam/memory")},
+        {perception_vlm_api_url,    std::string("")},
+        {perception_vlm_api_key,    std::string("")},
+        {perception_vlm_model,      std::string("gpt-4o")},
 
         // RAM (runtime)
         {rtsp_online,           false},
@@ -97,6 +116,17 @@ std::map<std::string, int> getPersistKeyMap() {
         {"tracker_hand_confirm",    tracker_hand_confirm},
         {"tracker_hand_lost",       tracker_hand_lost},
         {"ai_target_fps",           ai_target_fps},
+        // Perception pipeline
+        {"enable_perception",           enable_perception},
+        {"perception_max_tracked",      perception_max_tracked},
+        {"perception_embed_dim",        perception_embed_dim},
+        {"perception_embed_input",      perception_embed_input},
+        {"perception_hot_tier_max",     perception_hot_tier_max},
+        {"perception_interest_novelty_hl", perception_interest_novelty_hl},
+        {"perception_interest_motion_w",   perception_interest_motion_w},
+        {"perception_interest_threshold",  perception_interest_threshold},
+        {"perception_enrollment_delay",    perception_enrollment_delay},
+        {"perception_vlm_enabled",         perception_vlm_enabled},
         {"rtsp_mount",            rtsp_mount},
         {"ai_model_path",         ai_model_path},
         {"ai_labels",             ai_labels},
@@ -105,6 +135,12 @@ std::map<std::string, int> getPersistKeyMap() {
         {"rive_file",             rive_file},
         {"rive_target",           rive_target},
         {"model2_labels",         model2_labels},
+        // Perception pipeline (string)
+        {"perception_embedder_model", perception_embedder_model},
+        {"perception_memory_dir",     perception_memory_dir},
+        {"perception_vlm_api_url",    perception_vlm_api_url},
+        {"perception_vlm_api_key",    perception_vlm_api_key},
+        {"perception_vlm_model",      perception_vlm_model},
     };
 }
 
