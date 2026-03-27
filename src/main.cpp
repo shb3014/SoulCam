@@ -610,12 +610,20 @@ static void on_detections(const std::vector<sc::Detection>& dets,
     std::vector<sc::Detection> tracked;
     const std::vector<sc::Detection>* active = &dets;
 
+    // When perception pipeline is active, PerceptionEngine handles multi-object
+    // association and tracking internally -- bypass all legacy single-target
+    // filtering (hand tracker, adaptive target policy).
+    const bool perception_active = g_ai_for_policy &&
+        sc::ai_capture_get_perception(g_ai_for_policy) != nullptr;
+
     // Check if this is an interframe tracker result (model_id == -1).
     // Tracker frames already contain a single tracked target and should
     // bypass HandTargetTracker / adaptive policy (which rely on full YOLO output).
     const bool is_tracker_frame = !dets.empty() && dets[0].model_id == -1;
 
-    if (is_tracker_frame) {
+    if (perception_active) {
+        active = &dets;
+    } else if (is_tracker_frame) {
         active = &dets;
     } else if (sc::ai_capture_target_policy_enabled(g_ai_for_policy)) {
         // Unified target policy: ai_capture manages debounce + model weights.
@@ -1286,6 +1294,15 @@ int main(int argc, char** argv) {
                 cfg.perception.max_tracked_objects,
                 cfg.perception.embedder_model_path.empty() ? "(stub)" : cfg.perception.embedder_model_path.c_str(),
                 cfg.perception.vlm_enabled ? "enabled" : "disabled");
+    if (cfg.perception.enabled) {
+        SC_LOG_INFO("Identification mode: OBJECT TRACKING (multi-object perception pipeline, hand tracker bypassed)");
+    } else if (cfg.test_adaptive_hand_person) {
+        SC_LOG_INFO("Identification mode: HAND TRACKING (adaptive hand/person target policy)");
+    } else if (g_enable_hand_tracker) {
+        SC_LOG_INFO("Identification mode: HAND TRACKING (single-target hand tracker)");
+    } else {
+        SC_LOG_INFO("Identification mode: LEGACY (best-confidence single target)");
+    }
 
     // --- Set GStreamer plugin path BEFORE gst_init() ---
     // rgaconvert lives in a custom path; GStreamer scans plugins at init time.

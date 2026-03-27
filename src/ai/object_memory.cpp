@@ -83,7 +83,7 @@ MatchResult ObjectMemory::match(const std::vector<float>& query_embedding,
     MatchResult best;
 
     for (const auto& [id, obj] : objects_) {
-        if (obj.coarse_class != coarse_class) continue;
+        if (coarse_class != "object" && obj.coarse_class != coarse_class) continue;
 
         float best_exemplar_sim = 0.0f;
         for (const auto& ex : obj.exemplars) {

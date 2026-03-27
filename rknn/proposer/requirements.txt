@@ -1,0 +1,8 @@
+# Option A: YOLOv8 single-class retrain
+ultralytics>=8.0
+torch>=2.0
+onnx>=1.14
+
+# RKNN conversion (x86 Linux only)
+# Install separately: pip install rknn-toolkit2
+# See: https://github.com/airockchip/rknn-toolkit2

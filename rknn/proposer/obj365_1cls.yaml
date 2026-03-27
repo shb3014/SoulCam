@@ -1,0 +1,15 @@
+# Objects365 single-class dataset config for Ultralytics YOLOv8
+#
+# All 365 original classes are merged into a single "object" class.
+# Use merge_classes.py to preprocess annotation files before training.
+#
+# Usage:
+#   yolo detect train model=yolov8n.pt data=obj365_1cls.yaml epochs=50 imgsz=640
+
+path: /data/Objects365_1cls  # root directory (will contain images/ and labels/)
+train: images/train
+val: images/val
+
+nc: 1
+names:
+  0: object

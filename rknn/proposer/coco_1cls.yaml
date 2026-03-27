@@ -1,0 +1,19 @@
+# COCO single-class dataset config for Ultralytics YOLOv8
+#
+# Uses the standard COCO 2017 dataset but merges all 80 classes into
+# a single "object" class. Ultralytics auto-downloads COCO on first use.
+#
+# After auto-download completes, run merge_classes.py to rewrite labels:
+#   python merge_classes.py --labels-dir ../../../datasets/coco/labels/train2017
+#   python merge_classes.py --labels-dir ../../../datasets/coco/labels/val2017
+#
+# Then train:
+#   yolo detect train model=yolov8n.pt data=coco_1cls.yaml epochs=50 imgsz=640
+
+path: /home/shb3014/embeddedProjects/datasets/coco
+train: images/train2017
+val: images/val2017
+
+nc: 1
+names:
+  0: object

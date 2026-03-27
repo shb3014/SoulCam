@@ -548,8 +548,10 @@ progressive enrichment for novel ones.
 
 ## 11. Open Questions
 
-1. **Objects365 download**: Dataset is ~50 GB. Do we have sufficient disk space
-   on the WSL2 machine for training?
+1. ~~**Objects365 download**: Dataset is ~50 GB. Do we have sufficient disk space
+   on the WSL2 machine for training?~~
+   **Resolved**: WSL2 disk has >450 GB available. COCO used for first iteration;
+   Objects365 is feasible for follow-up training.
 2. **MobileNetV4 on RKNN**: Has anyone successfully converted MobileNetV4 to
    RKNN? This determines OCDet's viability. (Could test with a simple
    classification model first.)
@@ -559,10 +561,162 @@ progressive enrichment for novel ones.
 4. **NPU time budget**: Current YOLO takes ~28ms per frame. If we run the proposer
    at ~8ms + embedder at ~15ms, we're at ~23ms average — faster than current.
    But we lose per-frame YOLO class labels. Is this trade-off acceptable?
+5. **RKNN 2.3.2 auto_hybrid bug**: The `_set_fp16_hybrid` function crashes with
+   a `KeyError` for any ONNX graph containing Sigmoid output nodes. This forces
+   `auto_hybrid=False`, causing ~1-2 detection loss vs FP32 on borderline objects.
+   Need to check if newer rknn-toolkit2 versions fix this.
+6. **Score mode mismatch in stock model**: The Rockchip-provided `yolov8n.rknn`
+   exports sigmoid probabilities, but `detector.cpp` treats 9-output models as
+   logit outputs. This causes an effective confidence threshold of ~0.0, passing
+   nearly all proposals through. Should `detector.cpp` auto-detect score mode,
+   or should the stock model be re-exported with logit scores?
 
 ---
 
-## 12. References
+## 12. Phase 1 Results: Option A Implementation (2026-03-27)
+
+### 12.1 Training
+
+Trained YOLOv8n single-class on **COCO** (118K images, 860K boxes, all 80 classes
+merged to class 0 "object") as a quick-turnaround first pass before the full
+Objects365 run. Hardware: NVIDIA GeForce GTX 1660 SUPER (6 GB VRAM).
+
+| Setting | Value |
+|---------|-------|
+| Base model | `yolov8n.pt` (pretrained COCO) |
+| Dataset | COCO train2017 / val2017, all classes → "object" |
+| Epochs | 50 |
+| Image size | 640×640 |
+| Batch size | 16 |
+| Training time | ~34.6 hours |
+
+**Final metrics (epoch 50)**:
+
+| Metric | Epoch 1 | Epoch 50 |
+|--------|---------|----------|
+| mAP@50 | 0.523 | **0.607** |
+| mAP@50-95 | 0.333 | **0.411** |
+| Precision | 0.625 | **0.705** |
+| Recall | 0.466 | **0.518** |
+| box_loss | 1.173 | 1.112 |
+| cls_loss | 1.348 | 1.035 |
+
+Model file: `runs/detect/runs/proposer/yolov8n_1cls/weights/best.pt` (6.0 MB)
+
+### 12.2 ONNX Export: 9-Output Format Required
+
+The standard Ultralytics `yolo export format=onnx` produces a **single** combined
+output tensor `(1, 5, 8400)`. However, `detector.cpp` expects **9 separate outputs**
+(3 scales × 3 per scale: box, score, score_sum) — the same format as the existing
+hand model and the Rockchip-provided YOLOv8n.
+
+**Fix**: Used the existing `rknn/export_hand_yolov8_onnx.py` script, which
+monkey-patches the Detect head to expose per-branch outputs:
+
+```
+box_i   : [1, 64, H, W]     (DFL box regression)
+score_i : [1, 1,  H, W]     (class logit or sigmoid, 1 class)
+score_sum_i : [1, 1, H, W]  (sigmoid sum, used as pre-filter)
+```
+
+where `i ∈ {0, 1, 2}` for the three detection scales (80×80, 40×40, 20×20).
+
+### 12.3 RKNN Conversion: auto_hybrid Bug and Score Mode
+
+**Bug encountered**: RKNN toolkit 2.3.2 crashes with `KeyError: 'score_0'` in
+`quantizer.py:_set_fp16_hybrid` during INT8 quantization. This is triggered by
+any Sigmoid node in the ONNX graph (not specific to output naming). The bug
+affects sigmoid-mode exports; logit-mode exports avoid it because no Sigmoid
+nodes appear at the graph output.
+
+**Workaround**: Export with `--score-mode logit` (raw class logits in score
+tensors, sigmoid only in score_sum), which avoids the Sigmoid output nodes.
+This is the correct mode for `detector.cpp`, which sets `score_is_logit = true`
+for 9-output models and handles the logit→probability conversion internally.
+
+**Quantization variants tested**:
+
+| Variant | Algorithm | Calibration | Hybrid | Size | On-device FPS | Detections |
+|---------|-----------|-------------|--------|------|---------------|------------|
+| v1 (initial) | normal | 200 images | auto_hybrid=False | 4.4 MB | **20.4** | 3-5 |
+| v3_kl | kl_divergence | 200 images | auto_hybrid=False | 4.4 MB | 18.1 | 1-4 |
+| v3_normal500 | normal | 500 images | auto_hybrid=False | 4.4 MB | ~19 | similar |
+| v3_hybrid1 | normal | 200 images | hybrid_level=1 | 5.6 MB | **7.8** | 1 |
+| v3_mmse | mmse | 500 images | auto_hybrid=False | — | OOM killed | — |
+
+**Best variant**: v1 (normal algorithm, 200 calibration images, auto_hybrid=False).
+The `hybrid_level=1` model is too slow (FP16 layers fall back to CPU on RK3566).
+KL divergence and additional calibration images did not improve detection count.
+
+### 12.4 On-Device Deployment
+
+| Metric | Old model (80-class) | New model (1-class) |
+|--------|---------------------|---------------------|
+| Model file | `yolov8n.rknn` (Rockchip) | `yolov8n_1cls_rk3566_i8.rknn` |
+| RKNN outputs | 9 | 9 |
+| Classes | 80 | 1 ("object") |
+| Model size | 6.1 MB | 4.4 MB |
+| AI pipeline FPS | ~13.6 | **~20.4** |
+| `ai_labels` DP | `""` (default COCO) | `"object"` |
+
+**C++ changes deployed**:
+- `object_memory.cpp`: class filter bypass when `coarse_class == "object"`
+  (1 line, as planned in Section 10)
+- `store.json`: `ai_model_path` and `ai_labels` updated
+
+### 12.5 Detection Count Investigation
+
+Initial comparison showed the old model reporting ~35 detections vs ~3-5 for
+the new model on what appeared to be the same scene. Investigation revealed
+this was **not a regression** but a combination of two factors:
+
+**1. The old RKNN model has a score mode mismatch.**
+
+`detector.cpp` assumes 9-output models export raw logits in the score tensor
+(line 582: `score_is_logit = (per_branch == 3)`). It converts the confidence
+threshold to logit space: `conf_to_logit(0.25)` ≈ -1.1. However, the
+Rockchip-provided `yolov8n.rknn` exports sigmoid **probabilities** [0, 1].
+When INT8-quantized probabilities (always ≥ 0) are compared against a logit
+threshold of -1.1, **everything passes** — the threshold is effectively ~0.0.
+This explains the inflated detection count from the old model.
+
+**2. Same-frame FP32 comparison shows parity.**
+
+Running both models (FP32, unquantized) on the same camera frame:
+
+| Model | Detections (conf ≥ 0.25) | Objects |
+|-------|-------------------------|---------|
+| 80-class YOLOv8n (stock) | 4 | couch (0.88), vase (0.71), toilet (0.27), chair (0.27) |
+| 1-class YOLOv8n (ours) | **5** | object (0.90), object (0.59), object (0.56), object (0.44), object (0.36) |
+
+The 1-class model detects **more** objects than the 80-class model on the same
+frame. The INT8-quantized on-device model (3-5 detections) loses 1-2 borderline
+objects due to quantization, which is expected for `auto_hybrid=False`.
+
+### 12.6 Known Limitations and Next Steps
+
+**Quantization accuracy gap**: The `auto_hybrid=False` conversion loses ~1-2
+borderline detections vs FP32. The RKNN 2.3.2 `_set_fp16_hybrid` bug prevents
+using the normal auto-hybrid path. Potential mitigations:
+- Upgrade to a newer rknn-toolkit2 where the bug may be fixed
+- Train on Objects365 (30M boxes, 365 categories) for stronger objectness signal
+  that survives quantization better
+- Use the airockchip/ultralytics fork for ONNX export (may produce a graph
+  structure that avoids the RKNN bug)
+
+**Score mode mismatch in old model**: The Rockchip-provided `yolov8n.rknn`
+exports sigmoid probabilities but `detector.cpp` interprets them as logits,
+resulting in near-zero effective threshold. This should be investigated — the old
+model may have been providing many false-positive detections to the perception
+pipeline.
+
+**Objects365 training**: The current model was trained on COCO (80 classes, 860K
+boxes). Retraining on Objects365 (365 classes, 30M boxes) should significantly
+improve novel-object recall, as planned in the original recommendation.
+
+---
+
+## 13. References
 
 - [OCDet paper](https://arxiv.org/abs/2411.15653) — Chen et al., Nov 2024
 - [OLN paper](https://arxiv.org/abs/2108.06753) — Kim et al., Aug 2021

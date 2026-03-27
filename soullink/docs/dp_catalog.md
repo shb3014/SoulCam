@@ -235,6 +235,25 @@ When `tracker_adaptive_interval = true`, the scheduler dynamically decides
 when to run YOLO based on KCF PSR, velocity, and last YOLO confidence,
 bounded by `tracker_min_skip` and `tracker_max_skip`.
 
+### Example: switch identification mode (hand tracking ↔ object tracking)
+
+The `enable_perception` DP (31) acts as the master toggle between two identification modes:
+
+| `enable_perception` | Mode | Behavior |
+|:---:|------|----------|
+| `false` (default) | **Hand tracking** | Legacy single-target: `HandTargetTracker` / adaptive hand-person policy filters detections to one target. Overlay shows one box. |
+| `true` | **Object tracking** | Multi-object perception pipeline: `PerceptionEngine` + `MultiObjectAssociator` tracks all detected objects. Hand tracker is bypassed. Overlay shows all objects with identity + interest. |
+
+```
+# Switch to pure object tracking (restart required):
+1. setDp: enable_perception = true
+2. sysCmd: 1
+
+# Switch back to hand tracking:
+1. setDp: enable_perception = false
+2. sysCmd: 1
+```
+
 ### Example: enable perception pipeline from SoulFlow
 
 ```
